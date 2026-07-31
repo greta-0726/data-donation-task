@@ -1,0 +1,490 @@
+{
+  "platform_info": {
+    "name": "Instagram",
+    "filetypes": [
+      "json"
+    ],
+    "languages": [
+      "en",
+      "nl"
+    ],
+    "description": "Note that supported DDP language also includes Dutch and probably other languages as well. You get an english DDP regardless of the Dutch language setting. These data donation flows have not been tested yet, if you find anything wrong with them report to datadonation@uu.nl and they will be fixed!",
+    "time_last_tested": "not yet implemented"
+  },
+  "tables": [
+    {
+      "id": "instagram_followers",
+      "title": {
+        "en": "Your Instagram followers",
+        "nl": "Je Instagram-volgers",
+        "de": "Deine Instagram-Follower"
+      },
+      "description": {
+        "en": "List of accounts that follow you on Instagram.",
+        "nl": "Lijst van accounts die jou op Instagram volgen.",
+        "de": "Liste der Accounts, die dir auf Instagram folgen."
+      },
+      "headers": {
+        "Account": {
+          "en": "Account",
+          "nl": "Account",
+          "de": "Account"
+        },
+        "URL": {
+          "en": "URL",
+          "nl": "URL",
+          "de": "URL"
+        },
+        "Date": {
+          "en": "Date",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "followers_to_df",
+      "documentation": {
+        "summary": "Each row represents one account that follows the participant on Instagram, including when they started following.",
+        "source_file": "followers_1.json",
+        "columns": {
+          "Account": "Username or display name of the follower account.",
+          "URL": "Direct URL to the follower's Instagram profile.",
+          "Date": "ISO 8601 timestamp of when the account started following the participant."
+        }
+      }
+    },
+    {
+      "id": "instagram_following",
+      "title": {
+        "en": "Accounts that you follow on Instagram",
+        "nl": "Accounts die je volgt op Instagram",
+        "de": "Accounts, denen du auf Instagram folgst"
+      },
+      "description": {
+        "en": "In this table, you find the accounts that you follow on Instagram.",
+        "nl": "In deze tabel zie je de accounts die je volgt op Instagram.",
+        "de": "In dieser Tabelle findest du die Accounts, denen du auf Instagram folgst."
+      },
+      "headers": {
+        "Account": {
+          "en": "Account",
+          "nl": "Account",
+          "de": "Account"
+        },
+        "URL": {
+          "en": "URL",
+          "nl": "URL",
+          "de": "URL"
+        },
+        "Date": {
+          "en": "Date",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "following_to_df",
+      "documentation": {
+        "summary": "Each row represents one account that the participant follows on Instagram, including when they started following.",
+        "source_file": "following.json",
+        "columns": {
+          "Account": "Username or display name of the followed account.",
+          "URL": "Direct URL to the followed account's Instagram profile.",
+          "Date": "ISO 8601 timestamp of when the participant started following this account."
+        }
+      }
+    },
+    {
+      "id": "instagram_ads_viewed",
+      "title": {
+        "en": "Ads viewed on Instagram",
+        "nl": "Advertenties bekeken op Instagram",
+        "de": "Auf Instagram angesehene Werbeanzeigen"
+      },
+      "description": {
+        "en": "List of ads that you viewed on Instagram.",
+        "nl": "Lijst van advertenties die je op Instagram hebt bekeken.",
+        "de": "Liste der Werbeanzeigen, die du auf Instagram angesehen hast."
+      },
+      "headers": {
+        "Account name": {
+          "en": "Account name",
+          "nl": "Accountnaam",
+          "de": "Accountname"
+        },
+        "Name": {
+          "en": "Name",
+          "nl": "Naam",
+          "de": "Name"
+        },
+        "URL": {
+          "en": "URL",
+          "nl": "URL",
+          "de": "URL"
+        },
+        "Date": {
+          "en": "Date",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "ads_viewed_to_df",
+      "documentation": {
+        "summary": "Each row represents one advertisement impression shown to the participant on Instagram. Includes the advertiser identity and when the ad was displayed.",
+        "source_file": "ads_viewed.json",
+        "columns": {
+          "Account name": "Username of the advertiser's Instagram account.",
+          "Name": "Display name of the advertiser.",
+          "URL": "URL associated with the advertisement.",
+          "Date": "ISO 8601 timestamp of when the ad was shown to the participant."
+        }
+      }
+    },
+    {
+      "id": "instagram_posts_viewed",
+      "title": {
+        "en": "Posts viewed on Instagram",
+        "nl": "Berichten bekeken op Instagram",
+        "de": "Auf Instagram angesehene Beiträge"
+      },
+      "description": {
+        "en": "In this table you find the accounts of posts you viewed on Instagram sorted over time.",
+        "nl": "In deze tabel zie je de accounts van berichten die je op Instagram hebt bekeken, gesorteerd op tijd.",
+        "de": "In dieser Tabelle findest du die Accounts der Beiträge, die du auf Instagram angesehen hast, zeitlich sortiert."
+      },
+      "headers": {
+        "Author": {
+          "en": "Author",
+          "nl": "Auteur",
+          "de": "Autor"
+        },
+        "URL": {
+          "en": "URL",
+          "nl": "URL",
+          "de": "URL"
+        },
+        "Date": {
+          "en": "Date",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "posts_viewed_to_df",
+      "documentation": {
+        "summary": "Each row represents one post that appeared in the participant's Instagram feed and was registered as viewed. Captures the author and timing of each impression.",
+        "source_file": "posts_viewed.json",
+        "columns": {
+          "Author": "Username or display name of the account that published the viewed post.",
+          "URL": "Direct URL to the viewed post.",
+          "Date": "ISO 8601 timestamp of when the post was viewed."
+        }
+      }
+    },
+    {
+      "id": "instagram_videos_watched",
+      "title": {
+        "en": "Videos watched on Instagram",
+        "nl": "Video's bekeken op Instagram",
+        "de": "Auf Instagram angesehene Videos"
+      },
+      "description": {
+        "en": "In this table you find the accounts of videos you watched on Instagram sorted over time.",
+        "nl": "In deze tabel zie je de accounts van video's die je op Instagram hebt bekeken, gesorteerd op tijd.",
+        "de": "In dieser Tabelle findest du die Accounts der Videos, die du auf Instagram angesehen hast, zeitlich sortiert."
+      },
+      "headers": {
+        "Author": {
+          "en": "Author",
+          "nl": "Auteur",
+          "de": "Autor"
+        },
+        "URL": {
+          "en": "URL",
+          "nl": "URL",
+          "de": "URL"
+        },
+        "Date": {
+          "en": "Date",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "videos_watched_to_df",
+      "documentation": {
+        "summary": "Each row represents one video (including Reels) that the participant watched on Instagram. Captures the creator and timing of each view event.",
+        "source_file": "videos_watched.json",
+        "columns": {
+          "Author": "Username or display name of the account that published the watched video.",
+          "URL": "Direct URL to the watched video.",
+          "Date": "ISO 8601 timestamp of when the video was watched."
+        }
+      }
+    },
+    {
+      "id": "instagram_post_comments",
+      "title": {
+        "en": "Comments posted on Instagram",
+        "nl": "Reacties geplaatst op Instagram",
+        "de": "Auf Instagram geschriebene Kommentare"
+      },
+      "description": {
+        "en": "List of comments you posted on Instagram.",
+        "nl": "Lijst van reacties die je op Instagram hebt geplaatst.",
+        "de": "Liste der Kommentare, die du auf Instagram geschrieben hast."
+      },
+      "headers": {
+        "Comment": {
+          "en": "Comment",
+          "nl": "Reactie",
+          "de": "Kommentar"
+        },
+        "Media owner": {
+          "en": "Media owner",
+          "nl": "Media-eigenaar",
+          "de": "Medieninhaber"
+        },
+        "Date": {
+          "en": "Date",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "post_comments_to_df",
+      "documentation": {
+        "summary": "Each row represents one comment the participant posted on an Instagram post. Covers all matching comment files in the archive (e.g. post_comments.json, post_comments_1.json).",
+        "source_file": "post_comments*.json",
+        "columns": {
+          "Comment": "The full text of the comment posted by the participant.",
+          "Media owner": "Username of the account that owns the post the comment was placed on.",
+          "Date": "ISO 8601 timestamp of when the comment was posted."
+        }
+      }
+    },
+    {
+      "id": "instagram_liked_comments",
+      "title": {
+        "en": "Instagram liked comments",
+        "nl": "Instagram-reacties die je leuk vond",
+        "de": "Instagram-Kommentare, die dir gefallen haben"
+      },
+      "description": {
+        "en": "List of comments that you liked on Instagram.",
+        "nl": "Lijst van reacties die je leuk vond op Instagram.",
+        "de": "Liste der Kommentare, die dir auf Instagram gefallen haben."
+      },
+      "headers": {
+        "Account name": {
+          "en": "Account name",
+          "nl": "Accountnaam",
+          "de": "Accountname"
+        },
+        "Value": {
+          "en": "Value",
+          "nl": "Waarde",
+          "de": "Wert"
+        },
+        "Date": {
+          "en": "Date",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "liked_comments_to_df",
+      "documentation": {
+        "summary": "Each row represents one comment the participant liked on Instagram. Comment text may be absent in newer export formats.",
+        "source_file": "liked_comments.json",
+        "columns": {
+          "Account name": "Username of the account whose comment was liked.",
+          "Value": "Text of the liked comment, if available in the export (empty in newer export formats).",
+          "Date": "ISO 8601 timestamp of when the comment was liked."
+        }
+      }
+    },
+    {
+      "id": "instagram_liked_posts",
+      "title": {
+        "en": "Instagram liked posts",
+        "nl": "Instagram-berichten die je leuk vond",
+        "de": "Instagram-Beiträge, die dir gefallen haben"
+      },
+      "description": {
+        "en": "",
+        "nl": "",
+        "de": ""
+      },
+      "headers": {
+        "Account name": {
+          "en": "Account name",
+          "nl": "Accountnaam",
+          "de": "Accountname"
+        },
+        "Value": {
+          "en": "Value",
+          "nl": "Waarde",
+          "de": "Wert"
+        },
+        "Date": {
+          "en": "Date",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "liked_posts_to_df",
+      "documentation": {
+        "summary": "Each row represents one post the participant liked on Instagram, including the account whose post was liked and when the like was given.",
+        "source_file": "liked_posts.json",
+        "columns": {
+          "Account name": "Username of the account whose post was liked.",
+          "Value": "Display name or additional label for the liked post, depending on export format.",
+          "Date": "ISO 8601 timestamp of when the post was liked."
+        }
+      }
+    },
+    {
+      "id": "instagram_profile_searches",
+      "title": {
+        "en": "Your Instagram profile searches",
+        "nl": "Je Instagram-profielzoekopdrachten",
+        "de": "Deine Instagram-Profilsuchen"
+      },
+      "description": {
+        "en": "List of profiles you have searched for on Instagram.",
+        "nl": "Lijst van profielen die je op Instagram hebt gezocht.",
+        "de": "Liste der Profile, nach denen du auf Instagram gesucht hast."
+      },
+      "headers": {
+        "Name": {
+          "en": "Name",
+          "nl": "Naam",
+          "de": "Name"
+        },
+        "Timestamp": {
+          "en": "Timestamp",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "profile_searches_to_df",
+      "documentation": {
+        "summary": "Each row represents one profile search performed by the participant on Instagram, recording what was searched and when.",
+        "source_file": "profile_searches.json",
+        "columns": {
+          "Name": "Username or display name that was searched for.",
+          "Timestamp": "ISO 8601 timestamp of when the search was performed."
+        }
+      }
+    },
+    {
+      "id": "instagram_story_likes",
+      "title": {
+        "en": "Story likes on Instagram",
+        "nl": "Story-likes op Instagram",
+        "de": "Story-Likes auf Instagram"
+      },
+      "description": {
+        "en": "List of Instagram stories you liked.",
+        "nl": "Lijst van Instagram-stories die je leuk vond.",
+        "de": "Liste der Instagram-Storys, die dir gefallen haben."
+      },
+      "headers": {
+        "Account name": {
+          "en": "Account name",
+          "nl": "Accountnaam",
+          "de": "Accountname"
+        },
+        "Date": {
+          "en": "Date",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "story_likes_to_df",
+      "documentation": {
+        "summary": "Each row represents one Instagram Story the participant liked, recording the account whose story was liked and when.",
+        "source_file": "story_likes.json",
+        "columns": {
+          "Account name": "Username of the account whose story was liked.",
+          "Date": "ISO 8601 timestamp of when the story was liked."
+        }
+      }
+    },
+    {
+      "id": "instagram_threads_viewed",
+      "title": {
+        "en": "Threads viewed",
+        "nl": "Threads bekeken",
+        "de": "Angesehene Threads-Beiträge"
+      },
+      "description": {
+        "en": "List of Threads posts you viewed.",
+        "nl": "Lijst van Threads-berichten die je hebt bekeken.",
+        "de": "Liste der Threads-Beiträge, die du angesehen hast."
+      },
+      "headers": {
+        "Author": {
+          "en": "Author",
+          "nl": "Auteur",
+          "de": "Autor"
+        },
+        "URL": {
+          "en": "URL",
+          "nl": "URL",
+          "de": "URL"
+        },
+        "Date": {
+          "en": "Date",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        }
+      },
+      "extractor": "threads_viewed_to_df",
+      "documentation": {
+        "summary": "Each row represents one post on Threads (Meta's text-based social network linked to Instagram) that the participant viewed, including the author and timing.",
+        "source_file": "threads_viewed.json",
+        "columns": {
+          "Author": "Username or display name of the account that published the viewed Threads post.",
+          "URL": "Direct URL to the viewed Threads post.",
+          "Date": "ISO 8601 timestamp of when the post was viewed."
+        }
+      }
+    },
+    {
+      "id": "instagram_saved_posts",
+      "title": {
+        "en": "Your saved posts on Instagram",
+        "nl": "Je opgeslagen berichten op Instagram",
+        "de": "Deine gespeicherten Beiträge auf Instagram"
+      },
+      "description": {
+        "en": "List of posts you have saved on Instagram.",
+        "nl": "Lijst van berichten die je hebt opgeslagen op Instagram.",
+        "de": "Liste der Beiträge, die du auf Instagram gespeichert hast."
+      },
+      "headers": {
+        "Title": {
+          "en": "Title",
+          "nl": "Titel",
+          "de": "Titel"
+        },
+        "Timestamp": {
+          "en": "Timestamp",
+          "nl": "Datum en tijd",
+          "de": "Datum und Uhrzeit"
+        },
+        "URL": {
+          "en": "URL",
+          "nl": "URL",
+          "de": "URL"
+        }
+      },
+      "extractor": "saved_posts_to_df",
+      "documentation": {
+        "summary": "Each row represents one post the participant bookmarked (saved) on Instagram for later viewing.",
+        "source_file": "saved_posts.json",
+        "columns": {
+          "Title": "Title or label of the saved post as stored in the export.",
+          "URL": "Direct URL to the saved post.",
+          "Timestamp": "ISO 8601 timestamp of when the post was saved."
+        }
+      }
+    }
+  ]
+}
