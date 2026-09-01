@@ -897,12 +897,14 @@ def posts_viewed_to_df(
               "type": "area",
               "group": {
                 "column": "Date",
-                "dateFormat": "auto"
+                "dateFormat": "auto",
+                "label": "Datum"
+
               },
               "values": [
                 {
-                  "label": "Count",
-                  "aggregate": "count"
+                  "label": "Anzahl",
+                  "aggregate": "Anzahl"
                 }
               ]
             },
@@ -924,11 +926,11 @@ def posts_viewed_to_df(
               "group": {
                 "column": "Date",
                 "dateFormat": "hour_cycle",
-                "label": "Hour of the day"
+                "label": "Tageszeit"
               },
               "values": [
                 {
-                  "label": "Count"
+                  "label": "Anzahl"
                 }
               ]
             }
