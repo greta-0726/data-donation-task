@@ -131,7 +131,7 @@ def generate_file_prompt(
         {
             "en": "Please follow the download instructions and choose the file that you stored on your device.",
             "nl": "Volg de download instructies en kies het bestand dat u opgeslagen heeft op uw apparaat.",
-            "de": "Bitte folgen Sie den Anleitungen zum Herunterladen Ihrer Daten und wählen Sie jetzt die Datei aus, die Sie auf Ihrem Gerät gespeichert haben. Hinweis: Diese befindet sich üblicherweise in Ihrem Downloads-Ordner.",
+            "de": "Bitte wählen Sie jetzt die Datei aus, die Sie auf Ihrem Gerät gespeichert haben. Hinweis: Diese befindet sich üblicherweise in Ihrem Downloads-Ordner.",
             "pl": "Postępuj zgodnie z instrukcjami pobierania i wybierz plik zapisany na Twoim urządzeniu.",
             "tr": "Lütfen indirme talimatlarını takip et ve cihazına kaydettiğin dosyayı seç.",
             "ar": "يرجى اتباع تعليمات التنزيل واختيار الملف الذي قمت بتخزينه على جهازك.",
