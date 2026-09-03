@@ -40,6 +40,18 @@ interface Tooltip {
   y: number
 }
 
+// Per-table column widths for tables that need a layout different from the
+// default. Single-column tables are handled automatically below.
+const TABLE_COLUMN_WIDTHS: Record<string, string[]> = {
+  facebook_reels_usage: ['75%', '25%']
+}
+
+// Columns listed here are allowed to wrap instead of being truncated.
+// Single-column tables are handled automatically below.
+const TABLE_WRAP_COLUMNS: Record<string, number[]> = {
+  facebook_reels_usage: [0]
+}
+
 export const Table = ({
   table,
   show,
@@ -118,24 +130,45 @@ export const Table = ({
     return items
   }, [table, page, pageSize])
 
-  function getColumnStyle (index: number): React.CSSProperties {
-    if (table.id === 'facebook_reels_usage') {
-      if (index === 0) {
-        return { width: '75%' }
-      }
+  function isAdvertisersUsingInformationTable (): boolean {
+    return table.id.includes('advertisers_using')
+  }
 
-      if (index === 1) {
-        return { width: '25%' }
-      }
+  function getColumnStyle (index: number): React.CSSProperties {
+    const widths = TABLE_COLUMN_WIDTHS[table.id]
+
+    if (widths?.[index] != null) {
+      return { width: widths[index] }
     }
 
-    if (table.id === 'instagram_other_categories_used_to_reach_you') {
-      if (index === 0) {
-        return { width: '100%' }
-      }
+    // A table with only one data column should use the full available width.
+    // This covers e.g. ad interests and categories used to reach you.
+    if (columnNames.length === 1) {
+      return { width: '100%' }
+    }
+
+    // The advertiser-information table contains a short advertiser name and a
+    // much longer explanation. Give the explanation more room.
+    if (isAdvertisersUsingInformationTable()) {
+      if (index === 0) return { width: '40%' }
+      if (index === 1) return { width: '60%' }
     }
 
     return {}
+  }
+
+  function shouldWrapColumn (index: number): boolean {
+    if (TABLE_WRAP_COLUMNS[table.id]?.includes(index) ?? false) return true
+
+    // Do not truncate single-column tables at the Cell component's 15rem
+    // default. Let their values use the full table width instead.
+    if (columnNames.length === 1) return true
+
+    // Both columns in the advertiser-information table may contain longer
+    // text, so show the full value instead of an ellipsis/tooltip.
+    if (isAdvertisersUsingInformationTable()) return true
+
+    return false
   }
 
   function renderHeaderCell (value: string, i: number): ReactElement {
@@ -196,16 +229,7 @@ export const Table = ({
               search={search}
               cellClass={cellClass}
               setTooltip={setTooltip}
-              allowWrap={
-                (
-                  table.id === 'facebook_reels_usage' &&
-                  j === 0
-                ) ||
-                (
-                  table.id === 'instagram_other_categories_used_to_reach_you' &&
-                  j === 0
-                )
-              }
+              allowWrap={shouldWrapColumn(j)}
             />
           </td>
         ))}
