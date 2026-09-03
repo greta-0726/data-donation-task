@@ -30,7 +30,7 @@ Platform info::
 import logging
 import re
 from collections import Counter
-from typing import Callable
+from typing import Callable, cast 
 
 import pandas as pd
 
@@ -759,6 +759,123 @@ def ads_interests_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFra
 
     return out
 
+def other_categories_used_to_reach_you_to_df(
+    reader: ZipArchiveReader,
+    errors: Counter,
+    *,
+    filename: str = "ads_information/other_categories_used_to_reach_you.json",
+) -> pd.DataFrame:
+    """Extract advertising targeting categories associated with the participant.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction. Updated in-place.
+    filename:
+        Path inside the zip archive to read. Defaults to
+        ``"ads_information/other_categories_used_to_reach_you.json"``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Category``.
+        Empty DataFrame when the file is absent or parsing fails.
+
+    Table documentation::
+
+        {
+          "summary": "Each row represents one category that may be used to reach the participant with advertising on Facebook.",
+          "source_file": "ads_information/other_categories_used_to_reach_you.json",
+          "columns": {
+            "Category": "A category associated with the participant that may be used for advertising targeting."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_other_categories_used_to_reach_you",
+          "title": {
+            "en": "Categories used to reach you with ads",
+            "nl": "Categorieën die worden gebruikt om je met advertenties te bereiken",
+            "de": "Kategorien, die verwendet werden, um Sie mit Werbung zu erreichen",
+            "pl": "Kategorie używane do docierania do Ciebie z reklamami",
+            "tr": "Sana reklamlarla ulaşmak için kullanılan kategoriler",
+            "ar": "الفئات المستخدمة للوصول إليك بالإعلانات",
+            "ru": "Категории, используемые для показа вам рекламы",
+            "it": "Categorie utilizzate per raggiungerti con le inserzioni",
+            "ro": "Categorii utilizate pentru a ajunge la tine prin reclame",
+            "es": "Categorías utilizadas para mostrarte anuncios",
+            "sq": "Kategoritë e përdorura për të të arritur me reklama"
+          },
+          "description": {
+            "en": "This table shows categories that Meta may use to determine which ads could be shown to you on Facebook.",
+            "nl": "Deze tabel toont categorieën die Meta kan gebruiken om te bepalen welke advertenties aan je kunnen worden getoond op Facebook.",
+            "de": "Diese Tabelle zeigt Kategorien, die Meta verwenden kann, um zu bestimmen, welche Werbung Ihnen auf Facebook angezeigt werden könnte.",
+            "pl": "Ta tabela pokazuje kategorie, których Meta może używać do określania, jakie reklamy mogą być Ci wyświetlane na Facebooku.",
+            "tr": "Bu tablo, Meta'nın Facebook'ta sana hangi reklamların gösterilebileceğini belirlemek için kullanabileceği kategorileri gösterir.",
+            "ar": "يعرض هذا الجدول الفئات التي قد تستخدمها Meta لتحديد الإعلانات التي يمكن عرضها لك على فيسبوك.",
+            "ru": "В этой таблице показаны категории, которые Meta может использовать для определения рекламы, которая может быть показана вам на Facebook.",
+            "it": "Questa tabella mostra le categorie che Meta può utilizzare per determinare quali inserzioni potrebbero esserti mostrate su Facebook.",
+            "ro": "Acest tabel arată categoriile pe care Meta le poate utiliza pentru a determina ce reclame ți-ar putea fi afișate pe Facebook.",
+            "es": "Esta tabla muestra las categorías que Meta puede utilizar para determinar qué anuncios podrían mostrarse en Facebook.",
+            "sq": "Kjo tabelë tregon kategoritë që Meta mund të përdorë për të përcaktuar se cilat reklama mund të të shfaqen në Facebook."
+          },
+          "headers": {
+            "Category": {
+              "en": "Category",
+              "nl": "Categorie",
+              "de": "Kategorie",
+              "pl": "Kategoria",
+              "tr": "Kategori",
+              "ar": "الفئة",
+              "ru": "Категория",
+              "it": "Categoria",
+              "ro": "Categorie",
+              "es": "Categoría",
+              "sq": "Kategoria"
+            }
+          }
+        }
+    """
+
+    result = reader.json(filename)
+
+    if not result.found:
+        return pd.DataFrame()
+
+    data = result.data
+    datapoints = []
+
+    try:
+        label_values = cast(dict, data).get("label_values", [])
+
+        for item in label_values:
+            if item.get("label") != "Name":
+                continue
+
+            for entry in item.get("vec", []):
+                value = entry.get("value", "")
+
+                if value:
+                    datapoints.append((
+                        eh.fix_latin1_string(value),
+                    ))
+
+        out = pd.DataFrame(
+            datapoints,
+            columns=["Category"],
+        )
+
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+        return pd.DataFrame()
+
+    return out
 
 def recently_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
     """Extract Facebook items recently viewed.
@@ -2268,6 +2385,7 @@ EXTRACTOR_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
     "your_search_history_to_df": your_search_history_to_df,
     "your_friends_to_df": your_friends_to_df,
     "ads_interests_to_df": ads_interests_to_df,
+    "other_categories_used_to_reach_you_to_df": other_categories_used_to_reach_you_to_df,
     "recently_viewed_to_df": recently_viewed_to_df,
     "recently_visited_to_df": recently_visited_to_df,
     "pages_and_profiles_you_follow_to_df": pages_and_profiles_you_follow_to_df,
