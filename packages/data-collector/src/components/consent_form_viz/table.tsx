@@ -172,22 +172,25 @@ export const Table = ({
   }
 
   function renderHeaderCell (value: string, i: number): ReactElement {
-    // Display translated header if available, fall back to raw column name
-    const displayName = table.headers?.[value] ?? value
+  // Display translated header if available, fall back to raw column name
+  const displayName = table.headers?.[value] ?? value
 
-    return (
-      <th
-        key={`header ${i}`}
-        style={getColumnStyle(i)}
+  return (
+    <th
+      key={`header ${i}`}
+      style={getColumnStyle(i)}
+    >
+      <div
+        className={`text-left ${cellClass}`}
+        style={{ fontWeight: 700 }}
       >
-        <div className={`text-left ${cellClass}`}>
-          <div className='whitespace-normal'>
-            {displayName}
-          </div>
+        <div className='whitespace-normal'>
+          {displayName}
         </div>
-      </th>
-    )
-  }
+      </div>
+    </th>
+  )
+}
 
   function renderRow (item: PropsUITableRow | null, i: number): ReactElement | null {
     if (item == null && i >= unfilteredRows) return null
@@ -268,7 +271,7 @@ export const Table = ({
           <div className='p-3 pt-1 pb-2 max-w-full overflow-x-auto'>
             <table className='table-fixed min-w-full'>
               <thead>
-                <tr className='border-b-2 border-grey4 border-solid'>
+                <tr className='border-b-2 border-grey4 border-solid bg-grey5'>
                   {table.deleteOption &&
                     (
                       <td className='w-8'>
