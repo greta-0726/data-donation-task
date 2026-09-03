@@ -59,7 +59,7 @@ DDP_CATEGORIES = [
         ddp_filetype=DDPFiletype.JSON,
         language=Language.EN,
         known_files=[
-"subscription_for_no_ads.json", "other_categories_used_to_reach_you.json", "ads_feedback_activity.json", "ads_personalization_consent.json", "advertisers_you've_interacted_with.json", "advertisers_using_your_activity_or_information.json", "story_views_in_past_7_days.json", "ad_preferences.json", "groups_you've_searched_for.json", "your_search_history.json", "primary_public_location.json", "timezone.json", "primary_location.json", "your_privacy_jurisdiction.json", "people_and_friends.json", "ads_interests.json", "notifications.json", "notification_of_meta_privacy_policy_update.json", "recently_viewed.json", "recently_visited.json", "your_avatar.json", "meta_avatars_post_backgrounds.json", "contacts_sync_settings.json", "timezone.json", "autofill_information.json", "profile_information.json", "profile_update_history.json", "your_transaction_survey_information.json", "your_recently_followed_history.json", "your_recently_used_emojis.json", "navigation_bar_activity.json", "pages_and_profiles_you_follow.json", "pages_you've_liked.json", "your_saved_items.json", "fundraiser_posts_you_likely_viewed.json", "your_fundraiser_donations_information.json", "your_event_responses.json", "event_invitations.json", "your_event_invitation_links.json", "likes_and_reactions_1.json", "your_uncategorized_photos.json", "payment_history.json", "your_answers_to_membership_questions.json", "your_group_membership_activity.json", "your_contributions.json", "group_posts_and_comments.json", "your_comments_in_groups.json", "instant_games.json", "your_page_or_groups_badges.json", "instant_games_usage_data.json", "who_you've_followed.json", "people_you_may_know.json", "received_friend_requests.json", "your_friends.json", "likes_and_reactions.json", "controls.json",
+"subscription_for_no_ads.json", "time_spent_on_facebook.json", "ads_feedback_activity.json", "your_video_consumption_summary.json", "ads_personalization_consent.json", "advertisers_you've_interacted_with.json", "advertisers_using_your_activity_or_information.json", "story_views_in_past_7_days.json", "groups_you've_searched_for.json", "your_search_history.json", "primary_public_location.json", "timezone.json", "primary_location.json", "your_privacy_jurisdiction.json", "people_and_friends.json", "ads_interests.json", "notifications.json", "notification_of_meta_privacy_policy_update.json", "recently_viewed.json", "recently_visited.json", "your_avatar.json", "meta_avatars_post_backgrounds.json", "contacts_sync_settings.json", "timezone.json", "profile_information.json", "profile_update_history.json", "your_transaction_survey_information.json", "your_recently_followed_history.json", "your_recently_used_emojis.json", "navigation_bar_activity.json", "pages_and_profiles_you_follow.json", "pages_you've_liked.json", "your_saved_items.json", "fundraiser_posts_you_likely_viewed.json", "your_fundraiser_donations_information.json", "your_event_responses.json", "event_invitations.json", "your_event_invitation_links.json", "likes_and_reactions_1.json", "your_uncategorized_photos.json", "payment_history.json", "your_answers_to_membership_questions.json", "your_group_membership_activity.json", "your_contributions.json", "group_posts_and_comments.json", "your_comments_in_groups.json", "instant_games.json", "your_page_or_groups_badges.json", "instant_games_usage_data.json", "who_you've_followed.json", "people_you_may_know.json", "received_friend_requests.json", "your_friends.json", "likes_and_reactions.json", "controls.json",
         ],
     ),
 ]
@@ -336,6 +336,161 @@ def facebook_reels_usage_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.
 
     return out
 
+def video_consumption_summary_to_df(
+    reader: ZipArchiveReader,
+    errors: Counter,
+    *,
+    filename: str = (
+        "your_facebook_activity/other_activity/"
+        "your_video_consumption_summary.json"
+    ),
+) -> pd.DataFrame:
+    """Extract the participant's Facebook video-consumption summary.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction. Updated in-place.
+    filename:
+        Path inside the zip archive to read. Defaults to
+        ``"your_facebook_activity/other_activity/"
+        "your_video_consumption_summary.json"``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Metric``, ``Duration (seconds)``.
+        Entries without a numeric duration are excluded.
+        Empty DataFrame when the file is absent, contains no numeric values,
+        or parsing fails.
+
+    Table documentation::
+
+        {
+          "summary": "Each row represents one aggregate measure of the participant's video-viewing activity on Facebook.",
+          "source_file": "your_facebook_activity/other_activity/your_video_consumption_summary.json",
+          "columns": {
+            "Metric": "Description of the video-viewing measure and its reporting period.",
+            "Duration (seconds)": "Total viewing time reported by Meta, expressed in seconds."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_video_consumption_summary",
+          "title": {
+            "en": "Video viewing summary",
+            "nl": "Overzicht van bekeken video's",
+            "de": "Zusammenfassung Ihrer Videowiedergabe",
+            "pl": "Podsumowanie oglądania filmów",
+            "tr": "Video izleme özeti",
+            "ar": "ملخص مشاهدة مقاطع الفيديو",
+            "ru": "Сводка просмотра видео",
+            "it": "Riepilogo della visualizzazione dei video",
+            "ro": "Rezumatul vizionării videoclipurilor",
+            "es": "Resumen de visualización de vídeos",
+            "sq": "Përmbledhje e shikimit të videove"
+          },
+          "description": {
+            "en": "This table shows how much time you spent watching different types of video content on Facebook during several recent periods.",
+            "nl": "Deze tabel toont hoeveel tijd je in verschillende recente perioden hebt besteed aan het bekijken van verschillende soorten video-inhoud op Facebook.",
+            "de": "Diese Tabelle zeigt, wie viel Zeit Sie in verschiedenen Zeiträumen mit unterschiedlichen Arten von Videoinhalten auf Facebook verbracht haben.",
+            "pl": "Ta tabela pokazuje czas spędzony na oglądaniu różnych rodzajów treści wideo na Facebooku w kilku ostatnich okresach.",
+            "tr": "Bu tablo, son dönemlerde Facebook'ta farklı video içerik türlerini izleyerek ne kadar zaman geçirdiğini gösterir.",
+            "ar": "يعرض هذا الجدول الوقت الذي قضيته في مشاهدة أنواع مختلفة من محتوى الفيديو على فيسبوك خلال فترات حديثة متعددة.",
+            "ru": "В этой таблице показано время, проведённое за просмотром различных видов видеоконтента на Facebook за несколько последних периодов.",
+            "it": "Questa tabella mostra il tempo trascorso a guardare diversi tipi di contenuti video su Facebook in vari periodi recenti.",
+            "ro": "Acest tabel arată timpul petrecut vizionând diferite tipuri de conținut video pe Facebook în mai multe perioade recente.",
+            "es": "Esta tabla muestra el tiempo que pasaste viendo distintos tipos de contenido de vídeo en Facebook durante varios periodos recientes.",
+            "sq": "Kjo tabelë tregon kohën e kaluar duke parë lloje të ndryshme videosh në Facebook gjatë disa periudhave të fundit."
+          },
+          "headers": {
+            "Metric": {
+              "en": "Viewing measure",
+              "nl": "Kijkmaatstaf",
+              "de": "Wiedergabemaß",
+              "pl": "Miara oglądania",
+              "tr": "İzleme ölçütü",
+              "ar": "مقياس المشاهدة",
+              "ru": "Показатель просмотра",
+              "it": "Misura di visualizzazione",
+              "ro": "Indicator de vizionare",
+              "es": "Medida de visualización",
+              "sq": "Matësi i shikimit"
+            },
+            "Duration (seconds)": {
+              "en": "Viewing time (seconds)",
+              "nl": "Kijktijd (seconden)",
+              "de": "Wiedergabezeit (Sekunden)",
+              "pl": "Czas oglądania (sekundy)",
+              "tr": "İzleme süresi (saniye)",
+              "ar": "وقت المشاهدة (بالثواني)",
+              "ru": "Время просмотра (секунды)",
+              "it": "Tempo di visualizzazione (secondi)",
+              "ro": "Timp de vizionare (secunde)",
+              "es": "Tiempo de visualización (segundos)",
+              "sq": "Koha e shikimit (sekonda)"
+            }
+          }
+        }
+    """
+
+    result = reader.json(filename)
+
+    if not result.found:
+        return pd.DataFrame()
+
+    data = result.data
+    datapoints = []
+
+    try:
+        label_values = cast(dict, data).get("label_values", [])
+
+        for item in label_values:
+            metric = eh.fix_latin1_string(
+                item.get("label", "")
+            )
+
+            raw_duration = eh.fix_latin1_string(
+                item.get("value", "")
+            )
+
+            # Extract digits independently of the language and unit.
+            #
+            # Examples:
+            # "120 seconds"       -> 120
+            # "120 Sekunden"      -> 120
+            # "1.200 Sekunden"    -> 1200
+            # "\u00c2\u00a0Sekunden" -> excluded because no number exists
+            duration_parts = re.findall(r"\d+", raw_duration)
+
+            if not metric or not duration_parts:
+                continue
+
+            duration_seconds = int("".join(duration_parts))
+
+            datapoints.append((
+                metric,
+                duration_seconds,
+            ))
+
+        return pd.DataFrame(
+            datapoints,
+            columns=[
+                "Metric",
+                "Duration (seconds)",
+            ],
+        )
+
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+        return pd.DataFrame()
+
 def last_28_days_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
     """Extract how many videos you watched in the last 28 days on Facebook Watch.
 
@@ -432,6 +587,253 @@ def last_28_days_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFram
 
     return out
 
+def time_spent_on_facebook_to_df(
+    reader: ZipArchiveReader,
+    errors: Counter,
+    *,
+    filename: str = (
+        "your_facebook_activity/other_activity/"
+        "time_spent_on_facebook.json"
+    ),
+) -> pd.DataFrame:
+    """Extract recorded Facebook usage intervals.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction. Updated in-place.
+    filename:
+        Path inside the zip archive to read. Defaults to
+        ``"your_facebook_activity/other_activity/"
+        "time_spent_on_facebook.json"``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Start time``, ``End time``, ``Duration (seconds)``,
+        ``Timezone``.
+        Empty DataFrame when the file is absent or parsing fails.
+
+    Table documentation::
+
+        {
+          "summary": "Each row represents one recorded interval during which the participant used Facebook.",
+          "source_file": "your_facebook_activity/other_activity/time_spent_on_facebook.json",
+          "columns": {
+            "Start time": "ISO 8601 timestamp marking the beginning of the recorded usage interval.",
+            "End time": "ISO 8601 timestamp marking the end of the recorded usage interval.",
+            "Duration (seconds)": "Length of the recorded usage interval in seconds.",
+            "Timezone": "Timezone reported by Facebook for the relevant period."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_time_spent",
+          "title": {
+            "en": "Time spent on Facebook",
+            "nl": "Tijd besteed op Facebook",
+            "de": "Auf Facebook verbrachte Zeit",
+            "pl": "Czas spędzony na Facebooku",
+            "tr": "Facebook'ta geçirilen süre",
+            "ar": "الوقت الذي قضيته على فيسبوك",
+            "ru": "Время, проведённое на Facebook",
+            "it": "Tempo trascorso su Facebook",
+            "ro": "Timp petrecut pe Facebook",
+            "es": "Tiempo pasado en Facebook",
+            "sq": "Koha e kaluar në Facebook"
+          },
+          "description": {
+            "en": "This table shows recorded intervals during which you used Facebook, including their start, end, and duration.",
+            "nl": "Deze tabel toont geregistreerde perioden waarin je Facebook gebruikte, inclusief het begin, einde en de duur.",
+            "de": "Diese Tabelle zeigt erfasste Zeiträume, in denen Sie Facebook genutzt haben, einschließlich Beginn, Ende und Dauer.",
+            "pl": "Ta tabela pokazuje zarejestrowane okresy korzystania z Facebooka, w tym ich początek, koniec i czas trwania.",
+            "tr": "Bu tablo, Facebook'u kullandığın kaydedilmiş zaman aralıklarını başlangıç, bitiş ve süreleriyle birlikte gösterir.",
+            "ar": "يعرض هذا الجدول الفترات المسجلة التي استخدمت فيها فيسبوك، بما في ذلك وقت البداية والنهاية والمدة.",
+            "ru": "В этой таблице показаны зарегистрированные периоды использования Facebook, включая время начала, окончания и продолжительность.",
+            "it": "Questa tabella mostra gli intervalli registrati durante i quali hai utilizzato Facebook, inclusi inizio, fine e durata.",
+            "ro": "Acest tabel arată intervalele înregistrate în care ai utilizat Facebook, inclusiv începutul, sfârșitul și durata acestora.",
+            "es": "Esta tabla muestra los intervalos registrados durante los que utilizaste Facebook, incluidos su inicio, fin y duración.",
+            "sq": "Kjo tabelë tregon intervalet e regjistruara gjatë të cilave ke përdorur Facebook, duke përfshirë fillimin, përfundimin dhe kohëzgjatjen."
+          },
+          "headers": {
+            "Start time": {
+              "en": "Start time",
+              "nl": "Begintijd",
+              "de": "Startzeit",
+              "pl": "Czas rozpoczęcia",
+              "tr": "Başlangıç zamanı",
+              "ar": "وقت البدء",
+              "ru": "Время начала",
+              "it": "Ora di inizio",
+              "ro": "Ora de început",
+              "es": "Hora de inicio",
+              "sq": "Koha e fillimit"
+            },
+            "End time": {
+              "en": "End time",
+              "nl": "Eindtijd",
+              "de": "Endzeit",
+              "pl": "Czas zakończenia",
+              "tr": "Bitiş zamanı",
+              "ar": "وقت الانتهاء",
+              "ru": "Время окончания",
+              "it": "Ora di fine",
+              "ro": "Ora de încheiere",
+              "es": "Hora de finalización",
+              "sq": "Koha e përfundimit"
+            },
+            "Duration (seconds)": {
+              "en": "Duration (seconds)",
+              "nl": "Duur (seconden)",
+              "de": "Dauer (Sekunden)",
+              "pl": "Czas trwania (sekundy)",
+              "tr": "Süre (saniye)",
+              "ar": "المدة (بالثواني)",
+              "ru": "Продолжительность (секунды)",
+              "it": "Durata (secondi)",
+              "ro": "Durată (secunde)",
+              "es": "Duración (segundos)",
+              "sq": "Kohëzgjatja (sekonda)"
+            },
+            "Timezone": {
+              "en": "Timezone",
+              "nl": "Tijdzone",
+              "de": "Zeitzone",
+              "pl": "Strefa czasowa",
+              "tr": "Saat dilimi",
+              "ar": "المنطقة الزمنية",
+              "ru": "Часовой пояс",
+              "it": "Fuso orario",
+              "ro": "Fus orar",
+              "es": "Zona horaria",
+              "sq": "Zona kohore"
+            }
+          }
+        }
+    """
+
+    result = reader.json(filename)
+
+    if not result.found:
+        return pd.DataFrame()
+
+    data = result.data
+    datapoints = []
+
+    try:
+        label_values = cast(dict, data).get("label_values", [])
+
+        timezone_periods = []
+        fallback_timezones = []
+
+        # Find the timezone history by structure rather than translated labels.
+        for group in label_values:
+            for entry in group.get("dict", []):
+                timezone = eh.fix_latin1_string(
+                    entry.get("value", "")
+                )
+                effective_date = eh.fix_latin1_string(
+                    entry.get("label", "")
+                )
+
+                if not timezone:
+                    continue
+
+                fallback_timezones.append(timezone)
+
+                try:
+                    parsed_date = pd.to_datetime(
+                        effective_date
+                    ).date()
+
+                    timezone_periods.append((
+                        parsed_date,
+                        timezone,
+                    ))
+                except (TypeError, ValueError):
+                    pass
+
+        timezone_periods.sort(key=lambda item: item[0])
+
+        def timezone_for_epoch(epoch: int) -> str:
+            """Return the timezone applying at the given epoch."""
+
+            if timezone_periods:
+                interval_date = pd.to_datetime(
+                    epoch,
+                    unit="s",
+                    utc=True,
+                ).date()
+
+                applicable = [
+                    timezone
+                    for effective_date, timezone in timezone_periods
+                    if effective_date <= interval_date
+                ]
+
+                if applicable:
+                    return applicable[-1]
+
+                return timezone_periods[0][1]
+
+            if fallback_timezones:
+                return fallback_timezones[-1]
+
+            return ""
+
+        # The intervals group is identified by its nested vec/dict structure.
+        for group in label_values:
+            intervals = group.get("vec", [])
+
+            for interval in intervals:
+                timestamps = []
+
+                for entry in interval.get("dict", []):
+                    timestamp = entry.get("timestamp_value")
+
+                    try:
+                        timestamps.append(int(timestamp))
+                    except (TypeError, ValueError):
+                        continue
+
+                if len(timestamps) < 2:
+                    continue
+
+                start_epoch = min(timestamps)
+                end_epoch = max(timestamps)
+
+                datapoints.append((
+                    eh.epoch_to_iso(
+                        start_epoch,
+                        errors=errors,
+                    ),
+                    eh.epoch_to_iso(
+                        end_epoch,
+                        errors=errors,
+                    ),
+                    end_epoch - start_epoch,
+                    timezone_for_epoch(start_epoch),
+                ))
+
+        return pd.DataFrame(
+            datapoints,
+            columns=[
+                "Start time",
+                "End time",
+                "Duration (seconds)",
+                "Timezone",
+            ],
+        )
+
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+        return pd.DataFrame()
 
 def your_search_history_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
     """Extract Facebook search history.
@@ -877,6 +1279,368 @@ def other_categories_used_to_reach_you_to_df(
 
     return out
 
+def advertisers_using_your_information_to_df(
+    reader: ZipArchiveReader,
+    errors: Counter,
+    *,
+    filename: str = (
+        "ads_information/"
+        "advertisers_using_your_activity_or_information.json"
+    ),
+) -> pd.DataFrame:
+    """Extract advertisers using the participant's activity or information.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction. Updated in-place.
+    filename:
+        Path inside the zip archive to read. Defaults to
+        ``"ads_information/"
+        "advertisers_using_your_activity_or_information.json"``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Advertiser``, ``Information use``.
+        Empty DataFrame when the file is absent or parsing fails.
+
+    Table documentation::
+
+        {
+          "summary": "Each row represents an advertiser that used the participant's activity or information for advertising.",
+          "source_file": "ads_information/advertisers_using_your_activity_or_information.json",
+          "columns": {
+            "Advertiser": "Name of the advertiser.",
+            "Information use": "Meta's description of how the advertiser used information associated with the participant."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_advertisers_using_your_information",
+          "title": {
+            "en": "Advertisers using your information",
+            "nl": "Adverteerders die je informatie gebruiken",
+            "de": "Werbetreibende, die Ihre Informationen verwenden",
+            "pl": "Reklamodawcy korzystający z Twoich informacji",
+            "tr": "Bilgilerini kullanan reklamverenler",
+            "ar": "المعلنون الذين يستخدمون معلوماتك",
+            "ru": "Рекламодатели, использующие вашу информацию",
+            "it": "Inserzionisti che utilizzano le tue informazioni",
+            "ro": "Agenți de publicitate care utilizează informațiile tale",
+            "es": "Anunciantes que utilizan tu información",
+            "sq": "Reklamuesit që përdorin informacionin tënd"
+          },
+          "description": {
+            "en": "This table shows advertisers that Meta reports as having used your activity or information, for example through an advertiser list.",
+            "nl": "Deze tabel toont adverteerders die volgens Meta je activiteit of informatie hebben gebruikt, bijvoorbeeld via een lijst van een adverteerder.",
+            "de": "Diese Tabelle zeigt Werbetreibende, die laut Meta Ihre Aktivitäten oder Informationen verwendet haben, beispielsweise über eine Liste eines Werbetreibenden.",
+            "pl": "Ta tabela pokazuje reklamodawców, którzy według Meta korzystali z Twojej aktywności lub informacji, na przykład za pośrednictwem listy reklamodawcy.",
+            "tr": "Bu tablo, Meta'ya göre etkinliklerini veya bilgilerini, örneğin bir reklamveren listesi aracılığıyla, kullanan reklamverenleri gösterir.",
+            "ar": "يعرض هذا الجدول المعلنين الذين تفيد Meta بأنهم استخدموا نشاطك أو معلوماتك، على سبيل المثال من خلال قائمة خاصة بالمعلن.",
+            "ru": "В этой таблице показаны рекламодатели, которые, по данным Meta, использовали ваши действия или информацию, например с помощью списка рекламодателя.",
+            "it": "Questa tabella mostra gli inserzionisti che, secondo Meta, hanno utilizzato la tua attività o le tue informazioni, ad esempio tramite un elenco dell'inserzionista.",
+            "ro": "Acest tabel arată agenții de publicitate despre care Meta afirmă că au utilizat activitatea sau informațiile tale, de exemplu prin intermediul unei liste a unui agent de publicitate.",
+            "es": "Esta tabla muestra los anunciantes que, según Meta, han utilizado tu actividad o información, por ejemplo mediante una lista de anunciantes.",
+            "sq": "Kjo tabelë tregon reklamuesit që, sipas Meta, kanë përdorur aktivitetin ose informacionin tënd, për shembull nëpërmjet një liste reklamuesi."
+          },
+          "headers": {
+            "Advertiser": {
+              "en": "Advertiser",
+              "nl": "Adverteerder",
+              "de": "Werbetreibender",
+              "pl": "Reklamodawca",
+              "tr": "Reklamveren",
+              "ar": "المعلن",
+              "ru": "Рекламодатель",
+              "it": "Inserzionista",
+              "ro": "Agent de publicitate",
+              "es": "Anunciante",
+              "sq": "Reklamuesi"
+            },
+            "Information use": {
+              "en": "How your information was used",
+              "nl": "Hoe je informatie is gebruikt",
+              "de": "Wie Ihre Informationen verwendet wurden",
+              "pl": "Jak wykorzystano Twoje informacje",
+              "tr": "Bilgilerinin nasıl kullanıldığı",
+              "ar": "كيفية استخدام معلوماتك",
+              "ru": "Как использовалась ваша информация",
+              "it": "Come sono state utilizzate le tue informazioni",
+              "ro": "Cum au fost utilizate informațiile tale",
+              "es": "Cómo se utilizó tu información",
+              "sq": "Si u përdor informacioni yt"
+            }
+          }
+        }
+    """
+
+    result = reader.json(filename)
+
+    if not result.found:
+        return pd.DataFrame()
+
+    data = result.data
+    datapoints = []
+
+    try:
+        label_values = cast(dict, data).get("label_values", [])
+
+        for item in label_values:
+            information_use = eh.fix_latin1_string(
+                item.get("label", "")
+            )
+
+            for entry in item.get("vec", []):
+                advertiser = entry.get("value", "")
+
+                if not advertiser:
+                    continue
+
+                datapoints.append((
+                    eh.fix_latin1_string(advertiser),
+                    information_use,
+                ))
+
+        return pd.DataFrame(
+            datapoints,
+            columns=["Advertiser", "Information use"],
+        )
+
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+        return pd.DataFrame()
+    
+def advertisers_interacted_with_to_df(
+    reader: ZipArchiveReader,
+    errors: Counter,
+    *,
+    filename: str = (
+        "ads_information/"
+        "advertisers_you've_interacted_with.json"
+    ),
+) -> pd.DataFrame:
+    """Extract ads with which the participant interacted on Facebook.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction. Updated in-place.
+    filename:
+        Path inside the zip archive to read. Defaults to
+        ``"ads_information/advertisers_you've_interacted_with.json"``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Action``, ``Ad title``, ``Content URL``, ``Timestamp``.
+        Empty DataFrame when the file is absent or parsing fails.
+
+    Table documentation::
+
+        {
+          "summary": "Each row represents an advertisement with which the participant interacted on Facebook.",
+          "source_file": "ads_information/advertisers_you've_interacted_with.json",
+          "columns": {
+            "Action": "Type of interaction with the advertisement, such as a click.",
+            "Ad title": "Title or text associated with the advertisement.",
+            "Content URL": "URL of the associated Facebook post, page, or other content.",
+            "Timestamp": "ISO 8601 timestamp of when the interaction occurred."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_advertisers_interacted_with",
+          "title": {
+            "en": "Ads you interacted with",
+            "nl": "Advertenties waarmee je interactie had",
+            "de": "Werbeanzeigen, mit denen Sie interagiert haben",
+            "pl": "Reklamy, z którymi wchodziłeś w interakcję",
+            "tr": "Etkileşimde bulunduğun reklamlar",
+            "ar": "الإعلانات التي تفاعلت معها",
+            "ru": "Реклама, с которой вы взаимодействовали",
+            "it": "Inserzioni con cui hai interagito",
+            "ro": "Reclame cu care ai interacționat",
+            "es": "Anuncios con los que interactuaste",
+            "sq": "Reklamat me të cilat ke ndërvepruar"
+          },
+          "description": {
+            "en": "This table shows ads that you interacted with on Facebook, including the type and time of the interaction.",
+            "nl": "Deze tabel toont advertenties waarmee je op Facebook interactie had, inclusief het type en tijdstip van de interactie.",
+            "de": "Diese Tabelle zeigt Werbeanzeigen, mit denen Sie auf Facebook interagiert haben, einschließlich der Art und des Zeitpunkts der Interaktion.",
+            "pl": "Ta tabela pokazuje reklamy, z którymi wchodziłeś w interakcję na Facebooku, w tym rodzaj i czas interakcji.",
+            "tr": "Bu tablo, Facebook'ta etkileşimde bulunduğun reklamları, etkileşim türünü ve zamanını gösterir.",
+            "ar": "يعرض هذا الجدول الإعلانات التي تفاعلت معها على فيسبوك، بما في ذلك نوع التفاعل ووقته.",
+            "ru": "В этой таблице показана реклама, с которой вы взаимодействовали на Facebook, включая тип и время взаимодействия.",
+            "it": "Questa tabella mostra le inserzioni con cui hai interagito su Facebook, inclusi il tipo e il momento dell'interazione.",
+            "ro": "Acest tabel arată reclamele cu care ai interacționat pe Facebook, inclusiv tipul și momentul interacțiunii.",
+            "es": "Esta tabla muestra los anuncios con los que interactuaste en Facebook, incluidos el tipo y el momento de la interacción.",
+            "sq": "Kjo tabelë tregon reklamat me të cilat ke ndërvepruar në Facebook, duke përfshirë llojin dhe kohën e ndërveprimit."
+          },
+          "headers": {
+            "Action": {
+              "en": "Action",
+              "nl": "Actie",
+              "de": "Handlung",
+              "pl": "Działanie",
+              "tr": "Eylem",
+              "ar": "الإجراء",
+              "ru": "Действие",
+              "it": "Azione",
+              "ro": "Acțiune",
+              "es": "Acción",
+              "sq": "Veprimi"
+            },
+            "Ad title": {
+              "en": "Ad title",
+              "nl": "Advertentietitel",
+              "de": "Titel der Werbeanzeige",
+              "pl": "Tytuł reklamy",
+              "tr": "Reklam başlığı",
+              "ar": "عنوان الإعلان",
+              "ru": "Название рекламы",
+              "it": "Titolo dell'inserzione",
+              "ro": "Titlul reclamei",
+              "es": "Título del anuncio",
+              "sq": "Titulli i reklamës"
+            },
+            "Content URL": {
+              "en": "Content URL",
+              "nl": "URL van de inhoud",
+              "de": "URL des Inhalts",
+              "pl": "Adres URL treści",
+              "tr": "İçerik URL'si",
+              "ar": "رابط المحتوى",
+              "ru": "URL контента",
+              "it": "URL del contenuto",
+              "ro": "Adresa URL a conținutului",
+              "es": "URL del contenido",
+              "sq": "URL-ja e përmbajtjes"
+            },
+            "Timestamp": {
+              "en": "Date",
+              "nl": "Datum",
+              "de": "Datum",
+              "pl": "Data",
+              "tr": "Tarih",
+              "ar": "التاريخ",
+              "ru": "Дата",
+              "it": "Data",
+              "ro": "Dată",
+              "es": "Fecha",
+              "sq": "Data"
+            }
+          }
+        }
+    """
+
+    result = reader.json(filename)
+
+    if not result.found:
+        return pd.DataFrame()
+
+    data = result.data
+    datapoints = []
+
+    # Labels inside label_values can depend on the participant's
+    # Facebook account language.
+    action_labels = {
+        "Action",
+        "Actie",
+        "Handlung",
+        "Działanie",
+        "Eylem",
+        "الإجراء",
+        "Действие",
+        "Azione",
+        "Acțiune",
+        "Acción",
+        "Veprimi",
+    }
+
+    title_labels = {
+        "Title",
+        "Titel",
+        "Tytuł",
+        "Başlık",
+        "العنوان",
+        "Название",
+        "Titolo",
+        "Titlu",
+        "Título",
+        "Titulli",
+    }
+
+    try:
+        for item in cast(list, data):
+            action = ""
+            ad_title = ""
+            content_url = ""
+
+            for entry in item.get("label_values", []):
+                label = eh.fix_latin1_string(
+                    entry.get("label", "")
+                )
+                value = eh.fix_latin1_string(
+                    entry.get("value", "")
+                )
+                href = eh.fix_latin1_string(
+                    entry.get("href", "")
+                )
+
+                # Prefer href when Meta supplies both value and href.
+                url = href or value
+
+                if label in action_labels:
+                    action = value
+
+                elif label in title_labels:
+                    ad_title = value
+
+                # Do not include links to Meta's public Ad Library.
+                elif "/ads/library/" in url:
+                    continue
+
+                elif url.startswith(("http://", "https://")):
+                    content_url = url
+
+            datapoints.append((
+                action,
+                ad_title,
+                content_url,
+                eh.epoch_to_iso(
+                    item.get("timestamp", ""),
+                    errors=errors,
+                ),
+            ))
+
+        return pd.DataFrame(
+            datapoints,
+            columns=[
+                "Action",
+                "Ad title",
+                "Content URL",
+                "Timestamp",
+            ],
+        )
+
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+        return pd.DataFrame()
+
+    
 def recently_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
     """Extract Facebook items recently viewed.
 
@@ -2381,11 +3145,15 @@ def controls_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
 EXTRACTOR_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
     "who_youve_followed_to_df": who_youve_followed_to_df,
     "facebook_reels_usage_to_df": facebook_reels_usage_to_df,
+    "video_consumption_summary_to_df": video_consumption_summary_to_df,
     "last_28_days_to_df": last_28_days_to_df,
+    "time_spent_on_facebook_to_df": time_spent_on_facebook_to_df,
     "your_search_history_to_df": your_search_history_to_df,
     "your_friends_to_df": your_friends_to_df,
     "ads_interests_to_df": ads_interests_to_df,
     "other_categories_used_to_reach_you_to_df": other_categories_used_to_reach_you_to_df,
+    "advertisers_using_your_information_to_df": advertisers_using_your_information_to_df,
+    "advertisers_interacted_with_to_df": advertisers_interacted_with_to_df,
     "recently_viewed_to_df": recently_viewed_to_df,
     "recently_visited_to_df": recently_visited_to_df,
     "pages_and_profiles_you_follow_to_df": pages_and_profiles_you_follow_to_df,
