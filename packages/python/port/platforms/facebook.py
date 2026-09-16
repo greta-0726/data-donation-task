@@ -59,8 +59,27 @@ DDP_CATEGORIES = [
         ddp_filetype=DDPFiletype.JSON,
         language=Language.EN,
         known_files=[
-"subscription_for_no_ads.json", "time_spent_on_facebook.json", "ads_feedback_activity.json", "your_video_consumption_summary.json", "ads_personalization_consent.json", "advertisers_you've_interacted_with.json", "advertisers_using_your_activity_or_information.json", "story_views_in_past_7_days.json", "groups_you've_searched_for.json", "your_search_history.json", "primary_public_location.json", "timezone.json", "primary_location.json", "your_privacy_jurisdiction.json", "people_and_friends.json", "ads_interests.json", "notifications.json", "notification_of_meta_privacy_policy_update.json", "recently_viewed.json", "recently_visited.json", "your_avatar.json", "meta_avatars_post_backgrounds.json", "contacts_sync_settings.json", "timezone.json", "profile_information.json", "profile_update_history.json", "your_transaction_survey_information.json", "your_recently_followed_history.json", "your_recently_used_emojis.json", "navigation_bar_activity.json", "pages_and_profiles_you_follow.json", "pages_you've_liked.json", "your_saved_items.json", "fundraiser_posts_you_likely_viewed.json", "your_fundraiser_donations_information.json", "your_event_responses.json", "event_invitations.json", "your_event_invitation_links.json", "likes_and_reactions_1.json", "your_uncategorized_photos.json", "payment_history.json", "your_answers_to_membership_questions.json", "your_group_membership_activity.json", "your_contributions.json", "group_posts_and_comments.json", "your_comments_in_groups.json", "instant_games.json", "your_page_or_groups_badges.json", "instant_games_usage_data.json", "who_you've_followed.json", "people_you_may_know.json", "received_friend_requests.json", "your_friends.json", "likes_and_reactions.json", "controls.json",
-        ],
+        # Present in your real Facebook exports; absent from the real Instagram export
+        "your_posts__check_ins__photos_and_videos_1.json",  # nearly universal — anyone who has posted
+        "pages_you've_liked.json",
+        "pages_and_profiles_you_follow.json",
+        "who_you've_followed.json",
+        "time_spent_on_facebook.json",
+        "likes_and_reactions.json", "likes_and_reactions_1.json",
+        "your_page_or_groups_badges.json",
+        "payment_history.json",
+        "fundraiser_posts_you_likely_viewed.json",
+        "your_fundraiser_donations_information.json",
+        "your_transaction_survey_information.json",
+        "your_marketplace_device_history.json",
+        "facebook_new_user_guide.json",
+        "your_information_download_requests.json",
+        "your_facebook_story_preferences.json",
+        "reels_preferences.json",
+        "your_camera_roll_controls.json",
+        "device_navigation_bar_information.json",
+        "navigation_bar_shortcut_history.json",
+        ]
     ),
 ]
 
@@ -86,7 +105,7 @@ def who_youve_followed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Da
 
         {
           "summary": "Each row represents a Facebook profile or page that the participant follows, including the name and the time they started following.",
-          "source_file": "who_you_ve_followed.json",
+          "source_file": "who_you've_followed.json",
           "columns": {
             "Name": "Name of the followed profile or page.",
             "Timestamp": "ISO 8601 timestamp of when the participant started following."
@@ -153,7 +172,7 @@ def who_youve_followed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Da
           }
         }
     """
-    result = reader.json("who_you_ve_followed.json")
+    result = reader.json("who_you've_followed.json")
     if not result.found:
         return pd.DataFrame()
     d = result.data
@@ -2077,7 +2096,7 @@ def pages_youve_liked_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Dat
 
         {
           "summary": "Each row represents a Facebook Page the participant has liked, including the page name, URL, and timestamp.",
-          "source_file": "pages_you_ve_liked.json",
+          "source_file": "pages_you've_liked.json",
           "columns": {
             "Name": "Name of the liked Facebook Page.",
             "URL": "URL of the liked Facebook Page.",
@@ -2158,7 +2177,7 @@ def pages_youve_liked_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Dat
           }
         }
     """
-    result = reader.json("pages_you_ve_liked.json")
+    result = reader.json("pages_you've_liked.json")
     if not result.found:
         return pd.DataFrame()
     d = result.data
