@@ -1659,7 +1659,308 @@ def advertisers_interacted_with_to_df(
         errors[type(e).__name__] += 1
         return pd.DataFrame()
 
-    
+
+def ads_viewed_to_df(
+    reader: ZipArchiveReader,
+    errors: Counter,
+    *,
+    filename: str = "logged_information/interactions/ads.json",
+) -> pd.DataFrame:
+    """Extract advertisements viewed by the participant on Facebook.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction. Updated in-place.
+    filename:
+        Path inside the zip archive to read. Defaults to
+        ``"logged_information/interactions/ads.json"``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Ad``, ``Date``.
+        Empty DataFrame when the file is absent or parsing fails.
+
+    Table documentation::
+
+        {
+          "summary": "Each row represents one advertisement viewed by the participant on Facebook and when it was viewed.",
+          "source_file": "logged_information/interactions/ads.json",
+          "columns": {
+            "Ad": "Advertisement label recorded by Facebook.",
+            "Date": "ISO 8601 timestamp of when the advertisement was viewed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_ads_viewed",
+          "title": {
+            "en": "Ads you viewed",
+            "nl": "Advertenties die je hebt bekeken",
+            "de": "Werbeanzeigen, die Sie angesehen haben",
+            "pl": "Reklamy, które wyświetliłeś/aś",
+            "tr": "Görüntülediğin reklamlar",
+            "ar": "الإعلانات التي شاهدتها",
+            "ru": "Реклама, которую вы просмотрели",
+            "it": "Inserzioni che hai visualizzato",
+            "ro": "Reclamele pe care le-ai vizualizat",
+            "es": "Anuncios que viste",
+            "sq": "Reklamat që ke parë"
+          },
+          "description": {
+            "en": "This table shows the ads you viewed on Facebook and when you viewed them.",
+            "nl": "Deze tabel toont de advertenties die je op Facebook hebt bekeken en wanneer je ze hebt bekeken.",
+            "de": "Diese Tabelle zeigt die Werbeanzeigen, die Sie auf Facebook angesehen haben, und wann Sie sie angesehen haben.",
+            "pl": "Ta tabela pokazuje reklamy wyświetlone przez Ciebie na Facebooku oraz czas ich wyświetlenia.",
+            "tr": "Bu tablo, Facebook'ta görüntülediğin reklamları ve onları ne zaman görüntülediğini gösterir.",
+            "ar": "يعرض هذا الجدول الإعلانات التي شاهدتها على فيسبوك ووقت مشاهدتها.",
+            "ru": "В этой таблице показана реклама, которую вы просмотрели на Facebook, и время просмотра.",
+            "it": "Questa tabella mostra le inserzioni che hai visualizzato su Facebook e quando le hai visualizzate.",
+            "ro": "Acest tabel arată reclamele pe care le-ai vizualizat pe Facebook și când le-ai vizualizat.",
+            "es": "Esta tabla muestra los anuncios que viste en Facebook y cuándo los viste.",
+            "sq": "Kjo tabelë tregon reklamat që ke parë në Facebook dhe kohën kur i ke parë."
+          },
+          "headers": {
+            "Ad": {
+              "en": "Ad",
+              "nl": "Advertentie",
+              "de": "Werbeanzeige",
+              "pl": "Reklama",
+              "tr": "Reklam",
+              "ar": "الإعلان",
+              "ru": "Реклама",
+              "it": "Inserzione",
+              "ro": "Reclamă",
+              "es": "Anuncio",
+              "sq": "Reklama"
+            },
+            "Date": {
+              "en": "Date",
+              "nl": "Datum",
+              "de": "Datum",
+              "pl": "Data",
+              "tr": "Tarih",
+              "ar": "التاريخ",
+              "ru": "Дата",
+              "it": "Data",
+              "ro": "Dată",
+              "es": "Fecha",
+              "sq": "Data"
+            }
+          }
+        }
+    """
+
+    result = reader.json(filename)
+
+    if not result.found:
+        return pd.DataFrame()
+
+    data = result.data
+    datapoints = []
+
+    try:
+        for item in cast(list, data):
+            ad = ""
+            timestamp = ""
+
+            for entry in item.get("label_values", []):
+                if not ad and entry.get("label") and "timestamp_value" not in entry:
+                    ad = eh.fix_latin1_string(entry.get("label", ""))
+
+                if timestamp == "" and entry.get("timestamp_value") not in (None, ""):
+                    timestamp = entry.get("timestamp_value", "")
+
+            datapoints.append((
+                ad,
+                eh.epoch_to_iso(timestamp, errors=errors),
+            ))
+
+        return pd.DataFrame(
+            datapoints,
+            columns=["Ad", "Date"],
+        )
+
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+        return pd.DataFrame()
+
+
+def content_shown_in_feed_to_df(
+    reader: ZipArchiveReader,
+    errors: Counter,
+    *,
+    filename: str = (
+        "logged_information/interactions/"
+        "content_that_has_been_shown_to_you_in_your_feed.json"
+    ),
+) -> pd.DataFrame:
+    """Extract content shown in the participant's Facebook Feed.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction. Updated in-place.
+    filename:
+        Path inside the zip archive to read. Defaults to
+        ``"logged_information/interactions/"
+        "content_that_has_been_shown_to_you_in_your_feed.json"``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Description``, ``URL``, ``Date``.
+        Empty DataFrame when the file is absent or parsing fails.
+
+    Table documentation::
+
+        {
+          "summary": "Each row represents one item that Facebook recorded as having shown in the participant's Feed.",
+          "source_file": "logged_information/interactions/content_that_has_been_shown_to_you_in_your_feed.json",
+          "columns": {
+            "Description": "Description of the item shown in the Feed, as recorded by Facebook.",
+            "URL": "URL of the post, video, or link shown in the Feed.",
+            "Date": "ISO 8601 timestamp of when the item was shown."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_content_shown_in_feed",
+          "title": {
+            "en": "Content shown in your Facebook Feed",
+            "nl": "Inhoud die in je Facebook-overzicht is weergegeven",
+            "de": "Inhalte, die Ihnen in Ihrem Facebook-Feed angezeigt wurden",
+            "pl": "Treści wyświetlone w Twoim kanale aktualności na Facebooku",
+            "tr": "Facebook Akışında sana gösterilen içerikler",
+            "ar": "المحتوى الذي ظهر لك في موجز فيسبوك",
+            "ru": "Контент, показанный вам в Ленте Facebook",
+            "it": "Contenuti mostrati nel tuo feed di Facebook",
+            "ro": "Conținut afișat în fluxul tău Facebook",
+            "es": "Contenido mostrado en tu feed de Facebook",
+            "sq": "Përmbajtjet e shfaqura në furnizimin tënd në Facebook"
+          },
+          "description": {
+            "en": "This table shows posts, videos and links that Facebook recorded as having shown in your Feed, including a description, the link, and when they were shown.",
+            "nl": "Deze tabel toont berichten, video's en links die Facebook volgens je gegevens in je overzicht heeft weergegeven, inclusief een beschrijving, de link en wanneer ze zijn weergegeven.",
+            "de": "Diese Tabelle zeigt Beiträge, Videos und Links, die Facebook laut Ihren Daten in Ihrem Feed angezeigt hat, einschließlich einer Beschreibung, des Links sowie des Datums und der Uhrzeit der Anzeige.",
+            "pl": "Ta tabela pokazuje posty, filmy i linki, które według danych Facebooka zostały wyświetlone w Twoim kanale aktualności, wraz z opisem, linkiem oraz datą i godziną wyświetlenia.",
+            "tr": "Bu tablo, Facebook verilerine göre Akışında gösterilen gönderileri, videoları ve bağlantıları; açıklama, bağlantı ve gösterilme zamanı ile birlikte gösterir.",
+            "ar": "يعرض هذا الجدول المنشورات ومقاطع الفيديو والروابط التي سجل فيسبوك ظهورها في موجزك، بما في ذلك الوصف والرابط وتاريخ ووقت ظهورها.",
+            "ru": "В этой таблице показаны публикации, видео и ссылки, которые, согласно данным Facebook, отображались в вашей Ленте, включая описание, ссылку, дату и время показа.",
+            "it": "Questa tabella mostra i post, i video e i link che, secondo i dati di Facebook, sono stati mostrati nel tuo feed, inclusi una descrizione, il link e la data e l'ora di visualizzazione.",
+            "ro": "Acest tabel arată postările, videoclipurile și linkurile care, potrivit datelor Facebook, au fost afișate în fluxul tău, inclusiv descrierea, linkul și data și ora afișării.",
+            "es": "Esta tabla muestra las publicaciones, los vídeos y los enlaces que, según los datos de Facebook, aparecieron en tu feed, incluida una descripción, el enlace y la fecha y hora en que se mostraron.",
+            "sq": "Kjo tabelë tregon postimet, videot dhe lidhjet që, sipas të dhënave të Facebook-ut, janë shfaqur në furnizimin tënd, duke përfshirë përshkrimin, lidhjen dhe datën e orën e shfaqjes."
+          },
+          "headers": {
+            "Description": {
+              "en": "Description",
+              "nl": "Beschrijving",
+              "de": "Beschreibung",
+              "pl": "Opis",
+              "tr": "Açıklama",
+              "ar": "الوصف",
+              "ru": "Описание",
+              "it": "Descrizione",
+              "ro": "Descriere",
+              "es": "Descripción",
+              "sq": "Përshkrimi"
+            },
+            "URL": {
+              "en": "URL",
+              "nl": "URL",
+              "de": "URL",
+              "pl": "URL",
+              "tr": "URL",
+              "ar": "الرابط",
+              "ru": "URL-адрес",
+              "it": "URL",
+              "ro": "URL",
+              "es": "URL",
+              "sq": "URL"
+            },
+            "Date": {
+              "en": "Date",
+              "nl": "Datum",
+              "de": "Datum",
+              "pl": "Data",
+              "tr": "Tarih",
+              "ar": "التاريخ",
+              "ru": "Дата",
+              "it": "Data",
+              "ro": "Dată",
+              "es": "Fecha",
+              "sq": "Data"
+            }
+          }
+        }
+    """
+
+    result = reader.json(filename)
+
+    if not result.found:
+        return pd.DataFrame()
+
+    data = result.data
+    datapoints = []
+
+    try:
+        records = data if isinstance(data, list) else [data]
+
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+
+            for section in record.get("label_values", []):
+                for item in section.get("vec", []):
+                    description = ""
+                    url = ""
+                    timestamp = ""
+
+                    for entry in item.get("dict", []):
+                        value = entry.get("value", "")
+                        href = entry.get("href", "")
+
+                        if entry.get("timestamp_value") not in (None, ""):
+                            timestamp = entry.get("timestamp_value", "")
+                        elif href or (
+                            isinstance(value, str)
+                            and value.startswith(("http://", "https://"))
+                        ):
+                            url = eh.fix_latin1_string(href or value)
+                        elif value and not description:
+                            description = eh.fix_latin1_string(value).strip()
+
+                    if description or url or timestamp != "":
+                        datapoints.append((
+                            description,
+                            url,
+                            eh.epoch_to_iso(timestamp, errors=errors),
+                        ))
+
+        return pd.DataFrame(
+            datapoints,
+            columns=["Description", "URL", "Date"],
+        )
+
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+        return pd.DataFrame()
+
+
 def recently_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
     """Extract Facebook items recently viewed.
 
@@ -3173,6 +3474,8 @@ EXTRACTOR_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
     "other_categories_used_to_reach_you_to_df": other_categories_used_to_reach_you_to_df,
     "advertisers_using_your_information_to_df": advertisers_using_your_information_to_df,
     "advertisers_interacted_with_to_df": advertisers_interacted_with_to_df,
+    "ads_viewed_to_df": ads_viewed_to_df,
+    "content_shown_in_feed_to_df": content_shown_in_feed_to_df,
     "recently_viewed_to_df": recently_viewed_to_df,
     "recently_visited_to_df": recently_visited_to_df,
     "pages_and_profiles_you_follow_to_df": pages_and_profiles_you_follow_to_df,
