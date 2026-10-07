@@ -28,6 +28,7 @@ Platform info::
 """
 
 import logging
+import re
 from collections import Counter
 from typing import Any, Callable, cast
 
@@ -2382,6 +2383,825 @@ def saved_posts_to_df(
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Category extractors (settings, security)
+#
+# These tables bundle many small Facebook files into a handful of tables so
+# participants are not shown dozens of near-empty tables.  The files are
+# heterogeneous: most use the localized ``label_values`` structure (labels are
+# in the participant's Facebook language), some use ``string_map_data`` dicts.
+# The helpers below therefore walk the structure generically instead of
+# relying on language-specific labels, and drop anything that looks like an
+# identifier (IP address, e-mail, phone number, cookie, user agent).
+# ---------------------------------------------------------------------------
+
+_LV_KEYS = {"label", "value", "timestamp_value", "vec", "dict", "title", "label_values", "href"}
+_PATH_SEP = " › "
+
+_RE_IPV4 = re.compile(r"\d{1,3}(\.\d{1,3}){3}")
+_RE_IPV6 = re.compile(r"[0-9a-fA-F:.]+")
+_RE_EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_RE_PHONE = re.compile(r"\+\d[\d\s().-]{6,}")
+_RE_HEX_TOKEN = re.compile(r"[0-9a-fA-F]{32,}")
+_RE_LONG_ID = re.compile(r"\d{15,}")
+
+
+def _is_sensitive_value(value: str) -> bool:
+    """Return True if *value* looks like an identifier that must not be donated."""
+    v = value.strip()
+    if not v:
+        return False
+    if v.startswith("Mozilla/") or "****" in v:
+        return True
+    if _RE_EMAIL.fullmatch(v) or _RE_PHONE.fullmatch(v) or _RE_IPV4.fullmatch(v):
+        return True
+    if _RE_HEX_TOKEN.fullmatch(v) or _RE_LONG_ID.fullmatch(v):
+        return True
+    if v.count(":") >= 3 and _RE_IPV6.fullmatch(v):
+        return True
+    return False
+
+
+def _clean_text(value) -> str:
+    return eh.fix_latin1_string(str(value)).strip()
+
+
+def _read_json_data(reader: ZipArchiveReader, errors: Counter, path: str):
+    """Return parsed JSON for *path*, or None if the file is absent or unreadable."""
+    try:
+        result = reader.json(path)
+    except Exception as e:  # found-but-broken file (ADR-0024)
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+        return None
+    if not result.found:
+        return None
+    return result.data
+
+
+def _label_value_rows(
+    data,
+    category: str,
+    errors: Counter,
+    *,
+    scalars_only: bool = False,
+    nested_only: bool = False,
+    keep_empty_labels: bool = False,
+) -> list[tuple[str, str, str, str]]:
+    """Flatten a ``label_values`` (or plain dict) structure into settings rows.
+
+    Returns ``(category, setting, value, date)`` tuples.
+
+    Parameters
+    ----------
+    scalars_only:
+        Do not descend into nested ``dict`` / ``vec`` values (used for files
+        whose nested values are lists of other people).
+    nested_only:
+        Only keep values found inside a nested ``dict`` / ``vec``.
+    keep_empty_labels:
+        Also emit labels that carry no value at all (as a row with an empty
+        Value).  Used for consent records, where the label *is* the information
+        and the record date is the item's timestamp.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+
+    def emit(path: list, value, date: str, depth: int, *, is_timestamp: bool = False) -> None:
+        if nested_only and depth == 0:
+            return
+        text = _clean_text(value)
+        if not text or _is_sensitive_value(text):
+            return
+        setting = _PATH_SEP.join(p for p in path if p) or category
+        if is_timestamp:
+            # A timestamp *is* the date of the record: show it in the Date column.
+            rows.append((category, setting, "", text))
+        else:
+            rows.append((category, setting, text, date))
+
+    def leaf_text(leaf: dict) -> str:
+        if leaf.get("value") not in (None, ""):
+            return _clean_text(leaf["value"])
+        if leaf.get("timestamp_value"):
+            return eh.epoch_to_iso(leaf["timestamp_value"], errors=errors)
+        return ""
+
+    def try_group(child, path: list, date: str, depth: int) -> bool:
+        """Emit one 'name: value; ...' row for an unlabeled group of scalar settings."""
+        if not isinstance(child, dict) or child.get("label") or child.get("title"):
+            return False
+        leaves = child.get("dict")
+        if not isinstance(leaves, list) or not leaves:
+            return False
+        parts = []
+        for leaf in leaves:
+            if not isinstance(leaf, dict) or "label" not in leaf or "dict" in leaf or "vec" in leaf:
+                return False
+            text = leaf_text(leaf)
+            if text and not _is_sensitive_value(text):
+                parts.append(f"{_clean_text(leaf['label'])}: {text}")
+        if len(parts) < 2:
+            return False
+        emit(path, "; ".join(parts), date, depth)
+        return True
+
+    def walk_children(children, path: list, date: str, depth: int) -> None:
+        if not isinstance(children, list):
+            walk(children, path, date, depth)
+            return
+        for child in children:
+            if not try_group(child, path, date, depth):
+                walk(child, path, date, depth)
+
+    def walk(node, path: list, date: str, depth: int) -> None:
+        if isinstance(node, list):
+            for child in node:
+                walk(child, path, date, depth)
+            return
+        if not isinstance(node, dict):
+            emit(path, node, date, depth)
+            return
+        if not (node.keys() & _LV_KEYS):
+            # Plain (old-style) mapping with English keys.
+            for key, val in node.items():
+                if key in ("media", "fbid", "timestamp"):
+                    continue
+                walk(val, path + [_clean_text(key)], date, depth)
+            return
+        if "label_values" in node:
+            ts = node.get("timestamp")
+            if isinstance(ts, (int, float)) and ts > 0:
+                date = eh.epoch_to_iso(ts, errors=errors)
+            walk_children(node["label_values"], path, date, depth)
+            return
+        label = node.get("label") or node.get("title")
+        new_path = path + [_clean_text(label)] if label else path
+        if keep_empty_labels and label and not any(k in node for k in ("value", "timestamp_value", "vec", "dict")):
+            rows.append((category, _PATH_SEP.join(p for p in new_path if p), "", date))
+        if node.get("timestamp_value"):
+            emit(new_path, eh.epoch_to_iso(node["timestamp_value"], errors=errors), date, depth, is_timestamp=True)
+        if "value" in node:
+            emit(new_path, node["value"], date, depth)
+        if scalars_only:
+            return
+        for key in ("vec", "dict"):
+            if key in node:
+                walk_children(node[key], new_path, date, depth + 1)
+
+    walk(data, [], "", 0)
+    return rows
+
+
+def _settings_df(
+    reader: ZipArchiveReader,
+    errors: Counter,
+    sources: list[tuple[str, str, dict]],
+) -> pd.DataFrame:
+    """Build a ``Category / Setting / Value / Date`` table from several files."""
+    rows: list[tuple[str, str, str, str]] = []
+    for path, category, options in sources:
+        data = _read_json_data(reader, errors, path)
+        if data is None:
+            continue
+        try:
+            rows.extend(_label_value_rows(data, category, errors, **options))
+        except Exception as e:
+            logger.error("Exception caught: %s", e)
+            errors[type(e).__name__] += 1
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows, columns=["Category", "Setting", "Value", "Date"])
+
+
+def _string_map_events(data, category: str, event: str, errors: Counter) -> list[tuple[str, str, str]]:
+    """Return ``(category, event, date)`` for ``string_map_data`` style records.
+
+    Only the first non-zero timestamp of each record is used; values (IP address,
+    user agent, cookie name, username, e-mail, phone, ...) are never read.  The
+    keys of ``string_map_data`` are localized, so they are not relied upon.
+    """
+    rows: list[tuple[str, str, str]] = []
+    if not isinstance(data, dict):
+        return rows
+    for records in data.values():
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            ts = next(
+                (v["timestamp"] for v in (record.get("string_map_data") or {}).values()
+                 if isinstance(v, dict) and isinstance(v.get("timestamp"), (int, float)) and v["timestamp"] > 0),
+                None,
+            )
+            if ts:
+                rows.append((category, event, eh.epoch_to_iso(ts, errors=errors)))
+    return rows
+
+
+
+def ad_settings_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Extract ad-related and off-Instagram activity settings from Instagram.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Category``, ``Setting``, ``Value``, ``Date``.
+        Empty DataFrame when none of the source files are present.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is one setting related to advertising on Instagram or to activity of other websites and apps shared with Meta (ad preferences, ad-free subscription status, off-Meta activity settings, in-app ad messages).",
+          "source_file": "ads_information/instagram_ads_and_businesses/ad_preferences.json, ads_information/instagram_ads_and_businesses/subscription_for_no_ads.json, ads_information/ads_and_topics/in-app_message.json, apps_and_websites_off_of_instagram/apps_and_websites/your_activity_off_meta_technologies_settings.json",
+          "columns": {
+            "Category": "Which Instagram file the row comes from.",
+            "Setting": "Name of the setting, as displayed in the participant's Instagram language (nested settings are joined with ' › ').",
+            "Value": "Value of the setting. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed.",
+            "Date": "ISO 8601 timestamp of when the record was last updated, or the timestamp itself when the setting is a point in time (empty when not available)."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_ad_settings",
+          "title": {
+            "en": "Ad and off-Instagram activity settings",
+            "nl": "Advertentie-instellingen en activiteit buiten Instagram",
+            "de": "Werbeeinstellungen und Aktivitäten außerhalb von Instagram",
+            "pl": "Ustawienia reklam i aktywności poza Instagramem",
+            "tr": "Reklam ve Instagram dışı etkinlik ayarları",
+            "ar": "إعدادات الإعلانات والنشاط خارج إنستغرام",
+            "ru": "Настройки рекламы и активности вне Instagram",
+            "it": "Impostazioni degli annunci e dell'attività fuori da Instagram",
+            "ro": "Setări pentru reclame și activitatea din afara Instagram",
+            "es": "Ajustes de anuncios y de la actividad fuera de Instagram",
+            "sq": "Cilësimet e reklamave dhe aktivitetit jashtë Instagram"
+          },
+          "description": {
+            "en": "This table shows the settings and permissions related to the ads you see on Instagram and to the activity of other websites and apps that is shared with Instagram.",
+            "nl": "Deze tabel toont de instellingen en machtigingen met betrekking tot de advertenties die je op Instagram ziet en de activiteit van andere websites en apps die met Instagram wordt gedeeld.",
+            "de": "Diese Tabelle zeigt die Einstellungen und Berechtigungen zu den Werbeanzeigen, die Sie auf Instagram sehen, sowie zu Aktivitäten anderer Websites und Apps, die mit Instagram geteilt werden.",
+            "pl": "Ta tabela pokazuje ustawienia i uprawnienia dotyczące reklam wyświetlanych na Instagramie oraz aktywności innych witryn i aplikacji udostępnianej Instagramowi.",
+            "tr": "Bu tablo, Instagram'da gördüğün reklamlarla ve diğer web sitelerinin ve uygulamaların Instagram ile paylaşılan etkinliğiyle ilgili ayarları ve izinleri gösterir.",
+            "ar": "يعرض هذا الجدول الإعدادات والأذونات المتعلقة بالإعلانات التي تراها على إنستغرام ونشاط المواقع والتطبيقات الأخرى الذي تتم مشاركته مع إنستغرام.",
+            "ru": "В этой таблице показаны настройки и разрешения, связанные с рекламой, которую вы видите на Instagram, и с активностью других сайтов и приложений, передаваемой Instagram.",
+            "it": "Questa tabella mostra le impostazioni e le autorizzazioni relative agli annunci che vedi su Instagram e all'attività di altri siti web e app condivisa con Instagram.",
+            "ro": "Acest tabel arată setările și permisiunile legate de reclamele pe care le vezi pe Instagram și de activitatea altor site-uri și aplicații partajată cu Instagram.",
+            "es": "Esta tabla muestra los ajustes y permisos relacionados con los anuncios que ves en Instagram y con la actividad de otros sitios web y aplicaciones que se comparte con Instagram.",
+            "sq": "Kjo tabelë tregon cilësimet dhe lejet që lidhen me reklamat që sheh në Instagram dhe me aktivitetin e faqeve të tjera dhe aplikacioneve që ndahet me Instagram."
+          },
+          "headers": {
+            "Category": {
+              "en": "Category",
+              "nl": "Categorie",
+              "de": "Kategorie",
+              "pl": "Kategoria",
+              "tr": "Kategori",
+              "ar": "الفئة",
+              "ru": "Категория",
+              "it": "Categoria",
+              "ro": "Categorie",
+              "es": "Categoría",
+              "sq": "Kategoria"
+            },
+            "Setting": {
+              "en": "Setting",
+              "nl": "Instelling",
+              "de": "Einstellung",
+              "pl": "Ustawienie",
+              "tr": "Ayar",
+              "ar": "الإعداد",
+              "ru": "Настройка",
+              "it": "Impostazione",
+              "ro": "Setare",
+              "es": "Ajuste",
+              "sq": "Cilësimi"
+            },
+            "Value": {
+              "en": "Value",
+              "nl": "Waarde",
+              "de": "Wert",
+              "pl": "Wartość",
+              "tr": "Değer",
+              "ar": "القيمة",
+              "ru": "Значение",
+              "it": "Valore",
+              "ro": "Valoare",
+              "es": "Valor",
+              "sq": "Vlera"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    return _settings_df(reader, errors, [
+        ("ads_information/instagram_ads_and_businesses/ad_preferences.json", "Ad preferences", {}),
+        ("ads_information/instagram_ads_and_businesses/subscription_for_no_ads.json", "Ad-free subscription", {}),
+        ("ads_information/ads_and_topics/in-app_message.json", "In-app messages", {}),
+        ("apps_and_websites_off_of_instagram/apps_and_websites/your_activity_off_meta_technologies_settings.json", "Off-Meta activity settings", {}),
+    ])
+
+
+def consents_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Extract the consents the participant gave to Instagram.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Category``, ``Setting``, ``Value``, ``Date``.
+        Empty DataFrame when none of the source files are present.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is one consent record the participant gave to Instagram (e.g. processing of data by advertising partners) with its date.",
+          "source_file": "preferences/settings/consents.json",
+          "columns": {
+            "Category": "Which Instagram file the row comes from.",
+            "Setting": "Name of the consent, as displayed in the participant's Instagram language.",
+            "Value": "Status of the consent where available (often empty).",
+            "Date": "ISO 8601 timestamp of the consent or its last update."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_consents",
+          "title": {
+            "en": "Consents you gave",
+            "nl": "Toestemmingen die je hebt gegeven",
+            "de": "Von Ihnen erteilte Einwilligungen",
+            "pl": "Udzielone zgody",
+            "tr": "Verdiğin onaylar",
+            "ar": "الموافقات التي منحتها",
+            "ru": "Данные вами согласия",
+            "it": "Consensi che hai dato",
+            "ro": "Consimțămintele date",
+            "es": "Consentimientos que diste",
+            "sq": "Pëlqimet që ke dhënë"
+          },
+          "description": {
+            "en": "This table shows which consents (for example to the processing of your data by advertising partners) you gave to Instagram and when.",
+            "nl": "Deze tabel toont welke toestemmingen (bijvoorbeeld voor de verwerking van je gegevens door advertentiepartners) je aan Instagram hebt gegeven en wanneer.",
+            "de": "Diese Tabelle zeigt, welche Einwilligungen (zum Beispiel zur Verarbeitung Ihrer Daten durch Werbepartner) Sie Instagram erteilt haben und wann.",
+            "pl": "Ta tabela pokazuje, jakich zgód (na przykład na przetwarzanie Twoich danych przez partnerów reklamowych) udzieliłeś/aś Instagramowi i kiedy.",
+            "tr": "Bu tablo, Instagram'a hangi onayları (örneğin verilerinin reklam ortakları tarafından işlenmesi için) ne zaman verdiğini gösterir.",
+            "ar": "يعرض هذا الجدول الموافقات التي منحتها لإنستغرام (مثل معالجة بياناتك من قبل الشركاء الإعلانيين) ومتى منحتها.",
+            "ru": "В этой таблице показано, какие согласия (например, на обработку ваших данных рекламными партнёрами) вы дали Instagram и когда.",
+            "it": "Questa tabella mostra quali consensi (ad esempio al trattamento dei tuoi dati da parte di partner pubblicitari) hai dato a Instagram e quando.",
+            "ro": "Acest tabel arată ce consimțăminte (de exemplu pentru prelucrarea datelor tale de către parteneri publicitari) ai dat Instagram și când.",
+            "es": "Esta tabla muestra qué consentimientos (por ejemplo, al tratamiento de tus datos por parte de socios publicitarios) diste a Instagram y cuándo.",
+            "sq": "Kjo tabelë tregon cilat pëlqime (për shembull për përpunimin e të dhënave të tua nga partnerët reklamues) i ke dhënë Instagram dhe kur."
+          },
+          "headers": {
+            "Category": {
+              "en": "Category",
+              "nl": "Categorie",
+              "de": "Kategorie",
+              "pl": "Kategoria",
+              "tr": "Kategori",
+              "ar": "الفئة",
+              "ru": "Категория",
+              "it": "Categoria",
+              "ro": "Categorie",
+              "es": "Categoría",
+              "sq": "Kategoria"
+            },
+            "Setting": {
+              "en": "Setting",
+              "nl": "Instelling",
+              "de": "Einstellung",
+              "pl": "Ustawienie",
+              "tr": "Ayar",
+              "ar": "الإعداد",
+              "ru": "Настройка",
+              "it": "Impostazione",
+              "ro": "Setare",
+              "es": "Ajuste",
+              "sq": "Cilësimi"
+            },
+            "Value": {
+              "en": "Value",
+              "nl": "Waarde",
+              "de": "Wert",
+              "pl": "Wartość",
+              "tr": "Değer",
+              "ar": "القيمة",
+              "ru": "Значение",
+              "it": "Valore",
+              "ro": "Valoare",
+              "es": "Valor",
+              "sq": "Vlera"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    return _settings_df(reader, errors, [
+        ("preferences/settings/consents.json", "Consents", {"keep_empty_labels": True}),
+    ])
+
+
+def link_history_settings_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Extract the Instagram link-history setting.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Category``, ``Setting``, ``Value``, ``Date``.
+        Empty DataFrame when none of the source files are present.
+
+    Table documentation::
+
+        {
+          "summary": "The participant's Instagram link-history setting (whether links opened in the app are kept) and when it was last updated.",
+          "source_file": "logged_information/link_history/your_link_history_settings.json",
+          "columns": {
+            "Category": "Which Instagram file the row comes from.",
+            "Setting": "Name of the setting, as displayed in the participant's Instagram language.",
+            "Value": "Status of the setting where available (often empty).",
+            "Date": "ISO 8601 timestamp of the last update."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_link_history_settings",
+          "title": {
+            "en": "Link history setting",
+            "nl": "Instelling voor linkgeschiedenis",
+            "de": "Einstellung für den Link-Verlauf",
+            "pl": "Ustawienie historii linków",
+            "tr": "Bağlantı geçmişi ayarı",
+            "ar": "إعداد سجل الروابط",
+            "ru": "Настройка истории ссылок",
+            "it": "Impostazione della cronologia dei link",
+            "ro": "Setarea istoricului linkurilor",
+            "es": "Ajuste del historial de enlaces",
+            "sq": "Cilësimi i historikut të lidhjeve"
+          },
+          "description": {
+            "en": "This table shows the setting for Instagram's link history (the links you opened from within the app) and when it was last updated.",
+            "nl": "Deze tabel toont de instelling voor de linkgeschiedenis van Instagram (de links die je vanuit de app hebt geopend) en wanneer die voor het laatst is bijgewerkt.",
+            "de": "Diese Tabelle zeigt die Einstellung für den Link-Verlauf von Instagram (die Links, die Sie in der App geöffnet haben) und wann sie zuletzt aktualisiert wurde.",
+            "pl": "Ta tabela pokazuje ustawienie historii linków na Instagramie (linków otwartych w aplikacji) i kiedy zostało ostatnio zaktualizowane.",
+            "tr": "Bu tablo, Instagram'ın bağlantı geçmişi ayarını (uygulama içinden açtığın bağlantılar) ve en son ne zaman güncellendiğini gösterir.",
+            "ar": "يعرض هذا الجدول إعداد سجل الروابط في إنستغرام (الروابط التي فتحتها من داخل التطبيق) ومتى تم تحديثه آخر مرة.",
+            "ru": "В этой таблице показана настройка истории ссылок Instagram (ссылки, открытые в приложении) и время её последнего обновления.",
+            "it": "Questa tabella mostra l'impostazione della cronologia dei link di Instagram (i link aperti dall'app) e quando è stata aggiornata l'ultima volta.",
+            "ro": "Acest tabel arată setarea istoricului linkurilor din Instagram (linkurile deschise din aplicație) și când a fost actualizată ultima dată.",
+            "es": "Esta tabla muestra el ajuste del historial de enlaces de Instagram (los enlaces que abriste desde la aplicación) y cuándo se actualizó por última vez.",
+            "sq": "Kjo tabelë tregon cilësimin e historikut të lidhjeve në Instagram (lidhjet që ke hapur nga aplikacioni) dhe kur u përditësua së fundmi."
+          },
+          "headers": {
+            "Category": {
+              "en": "Category",
+              "nl": "Categorie",
+              "de": "Kategorie",
+              "pl": "Kategoria",
+              "tr": "Kategori",
+              "ar": "الفئة",
+              "ru": "Категория",
+              "it": "Categoria",
+              "ro": "Categorie",
+              "es": "Categoría",
+              "sq": "Kategoria"
+            },
+            "Setting": {
+              "en": "Setting",
+              "nl": "Instelling",
+              "de": "Einstellung",
+              "pl": "Ustawienie",
+              "tr": "Ayar",
+              "ar": "الإعداد",
+              "ru": "Настройка",
+              "it": "Impostazione",
+              "ro": "Setare",
+              "es": "Ajuste",
+              "sq": "Cilësimi"
+            },
+            "Value": {
+              "en": "Value",
+              "nl": "Waarde",
+              "de": "Wert",
+              "pl": "Wartość",
+              "tr": "Değer",
+              "ar": "القيمة",
+              "ru": "Значение",
+              "it": "Valore",
+              "ro": "Valoare",
+              "es": "Valor",
+              "sq": "Vlera"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    return _settings_df(reader, errors, [
+        ("logged_information/link_history/your_link_history_settings.json", "Link history setting", {"keep_empty_labels": True}),
+    ])
+
+
+def security_and_login_events_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Extract security and login events (event type and time only).
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Category``, ``Event``, ``Date``.
+        Empty DataFrame when none of the source files are present.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is one security- or login-related event (log-ins, log-outs, profile changes, password changes, sign-up, checkpoints). Only the type of event and the time are kept; IP addresses, user agents, devices, cookies, locations, contact details and usernames are never extracted.",
+          "source_file": "security_and_login_information/login_and_profile_creation/ (login_activity, logout_activity, profile_activity, password_change_activity, signup_details, last_known_location)",
+          "columns": {
+            "Category": "Which security file the event comes from.",
+            "Event": "Type of event (e.g. login, logout, profile changed), as displayed in the export.",
+            "Date": "ISO 8601 timestamp of the event."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_security_and_login_events",
+          "title": {
+            "en": "Security and login events",
+            "nl": "Beveiligings- en inloggebeurtenissen",
+            "de": "Sicherheits- und Anmeldeereignisse",
+            "pl": "Zdarzenia związane z bezpieczeństwem i logowaniem",
+            "tr": "Güvenlik ve oturum açma olayları",
+            "ar": "أحداث الأمان وتسجيل الدخول",
+            "ru": "События безопасности и входа",
+            "it": "Eventi di sicurezza e di accesso",
+            "ro": "Evenimente de securitate și autentificare",
+            "es": "Eventos de seguridad e inicio de sesión",
+            "sq": "Ngjarjet e sigurisë dhe hyrjes"
+          },
+          "description": {
+            "en": "This table shows when you logged in or out of Instagram and other security-related events. Only the type of event and the time are included. IP addresses, devices, cookies and contact details are not included.",
+            "nl": "Deze tabel toont wanneer je bent in- of uitgelogd bij Instagram en andere beveiligingsgebeurtenissen. Alleen het type gebeurtenis en het tijdstip zijn opgenomen. IP-adressen, apparaten, cookies en contactgegevens zijn niet opgenomen.",
+            "de": "Diese Tabelle zeigt, wann Sie sich bei Instagram an- oder abgemeldet haben, sowie weitere sicherheitsrelevante Ereignisse. Es sind nur die Art des Ereignisses und der Zeitpunkt enthalten. IP-Adressen, Geräte, Cookies und Kontaktdaten sind nicht enthalten.",
+            "pl": "Ta tabela pokazuje, kiedy logowałeś/aś się i wylogowywałeś/aś z Instagrama, oraz inne zdarzenia związane z bezpieczeństwem. Uwzględniono tylko rodzaj zdarzenia i czas. Adresy IP, urządzenia, pliki cookie i dane kontaktowe nie są uwzględnione.",
+            "tr": "Bu tablo, Instagram'a ne zaman giriş yaptığını veya çıkış yaptığını ve diğer güvenlikle ilgili olayları gösterir. Yalnızca olay türü ve zaman dahildir. IP adresleri, cihazlar, çerezler ve iletişim bilgileri dahil değildir.",
+            "ar": "يعرض هذا الجدول متى سجّلت الدخول إلى إنستغرام أو خرجت منه، وأحداث الأمان الأخرى. يتضمن نوع الحدث ووقته فقط. لا تتضمن البيانات عناوين IP والأجهزة وملفات تعريف الارتباط وبيانات الاتصال.",
+            "ru": "В этой таблице показано, когда вы входили в Instagram и выходили из него, а также другие события безопасности. Включены только тип события и время. IP-адреса, устройства, файлы cookie и контактные данные не включены.",
+            "it": "Questa tabella mostra quando hai effettuato l'accesso o sei uscito da Instagram e altri eventi legati alla sicurezza. Sono inclusi solo il tipo di evento e l'orario. Indirizzi IP, dispositivi, cookie e dati di contatto non sono inclusi.",
+            "ro": "Acest tabel arată când te-ai conectat sau te-ai deconectat de la Instagram și alte evenimente legate de securitate. Sunt incluse doar tipul evenimentului și ora. Adresele IP, dispozitivele, cookie-urile și datele de contact nu sunt incluse.",
+            "es": "Esta tabla muestra cuándo iniciaste o cerraste sesión en Instagram y otros eventos relacionados con la seguridad. Solo se incluyen el tipo de evento y la hora. No se incluyen direcciones IP, dispositivos, cookies ni datos de contacto.",
+            "sq": "Kjo tabelë tregon kur ke hyrë ose dalë nga Instagram dhe ngjarje të tjera që lidhen me sigurinë. Përfshihen vetëm lloji i ngjarjes dhe koha. Adresat IP, pajisjet, cookies dhe të dhënat e kontaktit nuk përfshihen."
+          },
+          "headers": {
+            "Category": {
+              "en": "Category",
+              "nl": "Categorie",
+              "de": "Kategorie",
+              "pl": "Kategoria",
+              "tr": "Kategori",
+              "ar": "الفئة",
+              "ru": "Категория",
+              "it": "Categoria",
+              "ro": "Categorie",
+              "es": "Categoría",
+              "sq": "Kategoria"
+            },
+            "Event": {
+              "en": "Event",
+              "nl": "Gebeurtenis",
+              "de": "Ereignis",
+              "pl": "Zdarzenie",
+              "tr": "Olay",
+              "ar": "الحدث",
+              "ru": "Событие",
+              "it": "Evento",
+              "ro": "Eveniment",
+              "es": "Evento",
+              "sq": "Ngjarja"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    base = "security_and_login_information/login_and_profile_creation/"
+    rows: list[tuple[str, str, str]] = []
+
+    try:
+        # string_map_data files: only the event time is used.
+        for filename, category, event in [
+            ("login_activity.json", "Login activity", "Login"),
+            ("logout_activity.json", "Logout activity", "Logout"),
+            ("password_change_activity.json", "Password changes", "Password change"),
+            ("signup_details.json", "Sign-up", "Sign-up"),
+            ("last_known_location.json", "Last known location", "Location uploaded"),
+        ]:
+            data = _read_json_data(reader, errors, base + filename)
+            if data is not None:
+                rows.extend(_string_map_events(data, category, event, errors))
+
+        # profile_activity repeats the logins/logouts above and adds profile
+        # changes and checkpoints: keep only events not already listed.
+        seen = {date for _, _, date in rows}
+        data = _read_json_data(reader, errors, base + "profile_activity.json")
+        for item in data if isinstance(data, list) else []:
+            label_values = [lv for lv in item.get("label_values", []) if isinstance(lv, dict)]
+            ts = next((lv["timestamp_value"] for lv in label_values if lv.get("timestamp_value")), None)
+            if not ts:
+                continue
+            date = eh.epoch_to_iso(ts, errors=errors)
+            if date in seen:
+                continue
+            # The first plain value is the event type (e.g. profile changed).
+            event = next((_clean_text(lv["value"]) for lv in label_values
+                          if lv.get("value") and not _is_sensitive_value(_clean_text(lv["value"]))), "")
+            rows.append(("Profile activity", event or "Profile activity", date))
+            seen.add(date)
+
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows, columns=["Category", "Event", "Date"]).sort_values("Date", ascending=False).reset_index(drop=True)
+
+
+def removed_suggestions_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Extract when the participant removed suggested accounts (dates only, no names).
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``.
+        Empty DataFrame when none of the source files are present.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a time at which the participant removed an account from the accounts Instagram suggested to follow. The names and usernames of the removed accounts are not extracted.",
+          "source_file": "connections/followers_and_following/removed_suggestions.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of when the suggestion was removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_removed_suggestions",
+          "title": {
+            "en": "Removed follow suggestions",
+            "nl": "Verwijderde volgsuggesties",
+            "de": "Entfernte Vorschläge zum Folgen",
+            "pl": "Usunięte propozycje obserwowania",
+            "tr": "Kaldırılan takip önerileri",
+            "ar": "اقتراحات المتابعة التي أزلتها",
+            "ru": "Удалённые рекомендации подписок",
+            "it": "Suggerimenti da seguire rimossi",
+            "ro": "Sugestii de urmărire eliminate",
+            "es": "Sugerencias de seguimiento eliminadas",
+            "sq": "Sugjerimet e ndjekjes të hequra"
+          },
+          "description": {
+            "en": "This table shows when you removed accounts from the accounts Instagram suggested you follow. The names of those accounts are not included.",
+            "nl": "Deze tabel toont wanneer je accounts hebt verwijderd uit de accounts die Instagram je voorstelde om te volgen. De namen van die accounts zijn niet opgenomen.",
+            "de": "Diese Tabelle zeigt, wann Sie Accounts aus den von Instagram vorgeschlagenen Accounts zum Folgen entfernt haben. Die Namen dieser Accounts sind nicht enthalten.",
+            "pl": "Ta tabela pokazuje, kiedy usunąłeś/usunęłaś konta z kont, które Instagram proponował Ci obserwować. Nazwy tych kont nie są uwzględnione.",
+            "tr": "Bu tablo, Instagram'ın takip etmeni önerdiği hesaplar arasından bazı hesapları ne zaman kaldırdığını gösterir. Bu hesapların adları dahil değildir.",
+            "ar": "يعرض هذا الجدول متى أزلت حسابات من الحسابات التي اقترح عليك إنستغرام متابعتها. لا تتضمن البيانات أسماء هذه الحسابات.",
+            "ru": "В этой таблице показано, когда вы удаляли аккаунты из рекомендаций Instagram для подписки. Названия этих аккаунтов не включены.",
+            "it": "Questa tabella mostra quando hai rimosso account dai suggerimenti che Instagram ti proponeva di seguire. I nomi di questi account non sono inclusi.",
+            "ro": "Acest tabel arată când ai eliminat conturi din sugestiile de urmărire pe care ți le-a oferit Instagram. Numele acestor conturi nu sunt incluse.",
+            "es": "Esta tabla muestra cuándo eliminaste cuentas de las sugerencias de seguimiento que Instagram te proponía. No se incluyen los nombres de esas cuentas.",
+            "sq": "Kjo tabelë tregon kur ke hequr llogari nga sugjerimet që Instagram të propozonte t'i ndiqje. Emrat e këtyre llogarive nuk përfshihen."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    data = _read_json_data(reader, errors, "connections/followers_and_following/removed_suggestions.json")
+    dates: list[str] = []
+
+    try:
+        for item in data if isinstance(data, list) else []:
+            ts = item.get("timestamp") if isinstance(item, dict) else None
+            if ts:
+                dates.append(eh.epoch_to_iso(ts, errors=errors))
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+
+    if not dates:
+        return pd.DataFrame()
+    return pd.DataFrame({"Date": sorted(dates, reverse=True)})
+
+
 # Extractor registry & platform info
 # ---------------------------------------------------------------------------
 
@@ -2401,6 +3221,11 @@ EXTRACTOR_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
     "stories_viewed_to_df": stories_viewed_to_df,
     "threads_viewed_to_df": threads_viewed_to_df,
     "saved_posts_to_df": saved_posts_to_df,
+    "ad_settings_to_df": ad_settings_to_df,
+    "consents_to_df": consents_to_df,
+    "link_history_settings_to_df": link_history_settings_to_df,
+    "security_and_login_events_to_df": security_and_login_events_to_df,
+    "removed_suggestions_to_df": removed_suggestions_to_df,
 }
 
 
