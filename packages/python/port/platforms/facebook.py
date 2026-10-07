@@ -939,7 +939,7 @@ def your_search_history_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.D
             "Date": {
               "en": "Date",
               "nl": "Datum",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -1560,7 +1560,7 @@ def advertisers_interacted_with_to_df(
             "Timestamp": {
               "en": "Date",
               "nl": "Datum",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -1753,7 +1753,7 @@ def ads_viewed_to_df(
             "Date": {
               "en": "Date",
               "nl": "Datum",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -1904,7 +1904,7 @@ def content_shown_in_feed_to_df(
             "Date": {
               "en": "Date",
               "nl": "Datum",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -2074,7 +2074,7 @@ def recently_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataF
             "Date": {
               "en": "Date",
               "nl": "Datum",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -2231,7 +2231,7 @@ def recently_visited_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Data
             "Date": {
               "en": "Date",
               "nl": "Datum",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -3331,7 +3331,7 @@ def controls_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
             "Date": {
               "en": "Date",
               "nl": "Datum",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -3412,8 +3412,42 @@ def _is_sensitive_value(value: str) -> bool:
     return False
 
 
+#: Display labels for the few English dict keys used by older export files.
+_PLAIN_KEY_LABELS = {
+    "location_services_setting_v2": "Einstellung für Standortdienste",
+}
+
+
+#: Meta leaves some labels untranslated (English) in otherwise German exports.
+#: Known ones are mapped to German here; unknown strings are kept as exported.
+_META_ENGLISH_TO_GERMAN = {
+    "Combined number of times you've used these privacy settings":
+        "Gesamtzahl der Verwendungen dieser Datenschutzeinstellungen",
+    "The level of permission Facebook has to use your Camera Roll data for each feature":
+        "Berechtigungsstufe, die Facebook für die Nutzung deiner Kamerarollen-Daten pro Funktion hat",
+    "Dismiss Click": "Schließen-Klick",
+    "Feed Comments": "Feed-Kommentare",
+    "Groups": "Gruppen",
+    "Notes": "Notizen",
+    "Other updates from Facebook": "Weitere Updates von Facebook",
+    "Pages": "Seiten",
+    "Photos": "Fotos",
+    "Translations": "Übersetzungen",
+    "Events": "Veranstaltungen",
+    "Audited translations updates": "Updates zu geprüften Übersetzungen",
+    "Translation task activity": "Aktivität bei Übersetzungsaufgaben",
+    "You being tagged in a video": "Videos, auf denen du markiert wirst",
+}
+_RE_IN_APP_MESSAGE = re.compile(r"^In-app Message\b", re.IGNORECASE)
+
+
 def _clean_text(value) -> str:
-    return eh.fix_latin1_string(str(value)).strip()
+    if isinstance(value, bool):
+        # Match the Richtig / Falsch wording Meta uses for booleans in German exports.
+        return "Richtig" if value else "Falsch"
+    text = eh.fix_latin1_string(str(value)).strip()
+    text = _META_ENGLISH_TO_GERMAN.get(text, text)
+    return _RE_IN_APP_MESSAGE.sub("In-App-Nachricht", text)
 
 
 def _read_json_data(reader: ZipArchiveReader, errors: Counter, path: str):
@@ -3512,7 +3546,7 @@ def _label_value_rows(
             for key, val in node.items():
                 if key in ("media", "fbid", "timestamp"):
                     continue
-                walk(val, path + [_clean_text(key)], date, depth)
+                walk(val, path + [_PLAIN_KEY_LABELS.get(key, _clean_text(key))], date, depth)
             return
         if "label_values" in node:
             ts = node.get("timestamp")
@@ -3607,23 +3641,44 @@ def _dig(obj, dotted: str):
 
 #: Plain-dict security files: (file, list key, category, event key or constant, timestamp key, detail key)
 _SECURITY_DICT_SOURCES = [
-    ("security_and_login_information/account_activity.json", "account_activity_v2", "Account activity", "action", "timestamp", "site_name"),
-    ("security_and_login_information/ip_address_activity.json", "used_ip_address_v2", "IP address activity", "action", "timestamp", None),
-    ("security_and_login_information/logins_and_logouts.json", "account_accesses_v2", "Logins and logouts", "action", "timestamp", "site"),
-    ("security_and_login_information/record_details.json", "admin_records_v2", "Record details", "event", "session.created_timestamp", None),
-    ("security_and_login_information/where_you're_logged_in.json", "active_sessions_v2", "Where you're logged in", "=Active session", "created_timestamp", "session_type"),
-    ("security_and_login_information/email_address_verifications.json", "contact_verifications_v2", "Contact verifications", "=Contact verified", "verification_time", None),
+    ("security_and_login_information/account_activity.json", "account_activity_v2", "Account-Aktivität", "action", "timestamp", "site_name"),
+    ("security_and_login_information/ip_address_activity.json", "used_ip_address_v2", "IP-Adress-Aktivität", "action", "timestamp", None),
+    ("security_and_login_information/logins_and_logouts.json", "account_accesses_v2", "An- und Abmeldungen", "action", "timestamp", "site"),
+    ("security_and_login_information/record_details.json", "admin_records_v2", "Protokolldetails", "event", "session.created_timestamp", None),
+    ("security_and_login_information/where_you're_logged_in.json", "active_sessions_v2", "Wo Sie angemeldet sind", "=Aktive Sitzung", "created_timestamp", "session_type"),
+    ("security_and_login_information/email_address_verifications.json", "contact_verifications_v2", "Kontaktverifizierungen", "=Kontakt verifiziert", "verification_time", None),
 ]
+
+#: German labels for the English event names and session types Meta uses in the
+#: older plain-dict security files (unknown values are kept as exported).
+_EVENT_LABELS = {
+    "Session updated": "Sitzung aktualisiert",
+    "Login": "Login",
+    "Login checks failed": "Login-Prüfungen fehlgeschlagen",
+    "Nonce Successful Validation": "Erfolgreiche Nonce-Validierung",
+    "Requested Password Reset": "Passwort-Zurücksetzung angefordert",
+    "Checkpoint": "Checkpoint",
+    "Checkpoint completed": "Checkpoint abgeschlossen",
+    "Password Change": "Passwortänderung",
+}
+_SESSION_TYPE_LABELS = {
+    "web": "Web",
+    "mobile_web": "Mobiles Web",
+    "iphone": "iPhone",
+    "android": "Android",
+    "instagram": "Instagram",
+    "messenger": "Messenger",
+}
 
 #: ``label_values`` security files: only labels and timestamps are kept.
 _SECURITY_LV_SOURCES = [
-    ("security_and_login_information/device_login_cookies.json", "Device login cookies", False),
-    ("security_and_login_information/information_about_your_last_login.json", "Last login", False),
-    ("security_and_login_information/login_messages_we_have_shown.json", "Login messages shown", False),
-    ("security_and_login_information/registration_information.json", "Registration", False),
-    ("security_and_login_information/two-factor_authentication.json", "Two-factor authentication", False),
-    ("security_and_login_information/your_profile_confirmation_information.json", "Profile confirmation", False),
-    ("security_and_login_information/your_recent_profile_recovery_successes.json", "Profile recovery", True),
+    ("security_and_login_information/device_login_cookies.json", "Geräte-Login-Cookies", False),
+    ("security_and_login_information/information_about_your_last_login.json", "Letzte Anmeldung", False),
+    ("security_and_login_information/login_messages_we_have_shown.json", "Angezeigte Login-Hinweise", False),
+    ("security_and_login_information/registration_information.json", "Registrierung", False),
+    ("security_and_login_information/two-factor_authentication.json", "Zwei-Faktor-Authentifizierung", False),
+    ("security_and_login_information/your_profile_confirmation_information.json", "Profilbestätigung", False),
+    ("security_and_login_information/your_recent_profile_recovery_successes.json", "Profilwiederherstellung", True),
 ]
 
 _RE_DMY = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})")
@@ -3754,9 +3809,9 @@ def ad_settings_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame
         }
     """
     return _settings_df(reader, errors, [
-        ("ads_information/ad_preferences.json", "Ad preferences", {}),
-        ("apps_and_websites_off_of_facebook/permissions_you_have_granted_to_apps.json", "Apps with permissions", {}),
-        ("apps_and_websites_off_of_facebook/your_activity_off_meta_technologies_settings.json", "Off-Meta activity settings", {}),
+        ("ads_information/ad_preferences.json", "Werbepräferenzen", {}),
+        ("apps_and_websites_off_of_facebook/permissions_you_have_granted_to_apps.json", "Apps mit Berechtigungen", {}),
+        ("apps_and_websites_off_of_facebook/your_activity_off_meta_technologies_settings.json", "Einstellungen zu Aktivitäten außerhalb von Meta", {}),
     ])
 
 
@@ -3878,18 +3933,18 @@ def preference_settings_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.D
     """
     base = "preferences/preferences/"
     return _settings_df(reader, errors, [
-        ("preferences/feed/reduce.json", "Feed: reduce content", {}),
-        (base + "language_settings_history.json", "Language settings history", {}),
-        (base + "preferred_language.json", "Preferred language", {}),
-        (base + "login_alerts_settings.json", "Login alerts", {}),
-        (base + "memorialization_settings.json", "Memorialization", {}),
-        (base + "notification_settings.json", "Notifications", {}),
+        ("preferences/feed/reduce.json", "Feed: Inhalte reduzieren", {}),
+        (base + "language_settings_history.json", "Verlauf der Spracheinstellungen", {}),
+        (base + "preferred_language.json", "Bevorzugte Sprache", {}),
+        (base + "login_alerts_settings.json", "Login-Benachrichtigungen", {}),
+        (base + "memorialization_settings.json", "Gedenkzustand", {}),
+        (base + "notification_settings.json", "Benachrichtigungen", {}),
         (base + "reels_preferences.json", "Reels", {}),
         (base + "video_settings.json", "Video", {}),
-        (base + "your_video_autoplay_settings.json", "Video autoplay", {}),
-        (base + "your_camera_roll_controls.json", "Camera roll", {}),
-        (base + "your_device_push_settings.json", "Device push settings", {}),
-        (base + "your_facebook_story_preferences.json", "Stories", {}),
+        (base + "your_video_autoplay_settings.json", "Video-Autoplay", {}),
+        (base + "your_camera_roll_controls.json", "Kamerarolle", {}),
+        (base + "your_device_push_settings.json", "Push-Einstellungen des Geräts", {}),
+        (base + "your_facebook_story_preferences.json", "Storys", {}),
     ])
 
 
@@ -4024,10 +4079,13 @@ def security_and_login_events_to_df(reader: ZipArchiveReader, errors: Counter) -
                     event = event_key[1:]
                 else:
                     event = _clean_text(entry.get(event_key, ""))
+                    event = _EVENT_LABELS.get(event, event)
                 ts = _dig(entry, ts_key)
                 if not ts:
                     continue
                 detail = _clean_text(entry.get(detail_key, "")) if detail_key else ""
+                if detail_key == "session_type":
+                    detail = _SESSION_TYPE_LABELS.get(detail, detail)
                 if _is_sensitive_value(detail):
                     detail = ""
                 rows.append((category, event, eh.epoch_to_iso(ts, errors=errors), detail))
@@ -4037,7 +4095,7 @@ def security_and_login_events_to_df(reader: ZipArchiveReader, errors: Counter) -
         if isinstance(data, dict):
             for timestamps in (data.get("datr_stats_v2") or {}).values():
                 for ts in timestamps:
-                    rows.append(("Browser cookies", "Browser cookie used", eh.epoch_to_iso(ts, errors=errors), ""))
+                    rows.append(("Browser Cookies", "Browser Cookie genutzt", eh.epoch_to_iso(ts, errors=errors), ""))
 
         # label_values files: labels + timestamps only, values are never read.
         for path, category, item_only in _SECURITY_LV_SOURCES:
@@ -4171,7 +4229,7 @@ def privacy_settings_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Data
         }
     """
     return _settings_df(reader, errors, [
-        ("preferences/preferences/privacy_settings.json", "Privacy settings", {}),
+        ("preferences/preferences/privacy_settings.json", "Datenschutzeinstellungen", {}),
     ])
 
 
@@ -4292,7 +4350,7 @@ def consents_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
         }
     """
     return _settings_df(reader, errors, [
-        ("logged_information/other_logged_information/consents.json", "Consents", {}),
+        ("logged_information/other_logged_information/consents.json", "Einwilligungen", {}),
     ])
 
 
@@ -4400,12 +4458,12 @@ def location_and_time_zone_to_df(reader: ZipArchiveReader, errors: Counter) -> p
     """
     loc = "logged_information/location/"
     df = _settings_df(reader, errors, [
-        (loc + "location_services_setting.json", "Location services", {}),
-        (loc + "timezone.json", "Time zone", {}),
-        (loc + "your_privacy_jurisdiction.json", "Privacy jurisdiction", {}),
+        (loc + "location_services_setting.json", "Standortdienste", {}),
+        (loc + "timezone.json", "Zeitzone", {}),
+        (loc + "your_privacy_jurisdiction.json", "Datenschutz-Zuständigkeit", {}),
         # City / region / country only: the sibling postal code is dropped.
-        (loc + "primary_location.json", "Primary location", {"nested_only": True}),
-        (loc + "primary_public_location.json", "Primary public location", {"nested_only": True}),
+        (loc + "primary_location.json", "Hauptstandort", {"nested_only": True}),
+        (loc + "primary_public_location.json", "Öffentlicher Hauptstandort", {"nested_only": True}),
     ])
     # None of these records carry a meaningful timestamp, so the Date column is dropped.
     return df.drop(columns=["Date"]) if not df.empty else df
@@ -4473,7 +4531,7 @@ def active_days_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame
             "Date": {
               "en": "Date",
               "nl": "Datum",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",

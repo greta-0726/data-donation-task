@@ -308,7 +308,7 @@ def followers_to_df(
             "Date": {
               "en": "Date",
               "nl": "Datum en tijd",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -449,7 +449,7 @@ def following_to_df(
             "Date": {
               "en": "Date",
               "nl": "Datum en tijd",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -870,7 +870,7 @@ def posts_viewed_to_df(
             "Date": {
               "en": "Date",
               "nl": "Datum en tijd",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -1078,7 +1078,7 @@ def videos_watched_to_df(
             "Date": {
               "en": "Date",
               "nl": "Datum en tijd",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -1257,7 +1257,7 @@ def post_comments_to_df(
             "Date": {
               "en": "Date",
               "nl": "Datum en tijd",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -1403,7 +1403,7 @@ def liked_comments_to_df(
             "Date": {
               "en": "Date and time",
               "nl": "Datum en tijd",
-              "de": "Datum und Uhrzeit",
+              "de": "Zeitstempel",
               "pl": "Data i godzina",
               "tr": "Tarih ve saat",
               "ar": "التاريخ والوقت",
@@ -1904,7 +1904,7 @@ def story_likes_to_df(
             "Date": {
               "en": "Date",
               "nl": "Datum en tijd",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -2033,7 +2033,7 @@ def stories_viewed_to_df(
             "Date": {
               "en": "Date and time",
               "nl": "Datum en tijd",
-              "de": "Datum und Uhrzeit",
+              "de": "Zeitstempel",
               "pl": "Data i godzina",
               "tr": "Tarih ve saat",
               "ar": "التاريخ والوقت",
@@ -2187,7 +2187,7 @@ def threads_viewed_to_df(
             "Date": {
               "en": "Date",
               "nl": "Datum en tijd",
-              "de": "Datum",
+              "de": "Zeitstempel",
               "pl": "Data",
               "tr": "Tarih",
               "ar": "التاريخ",
@@ -2422,8 +2422,42 @@ def _is_sensitive_value(value: str) -> bool:
     return False
 
 
+#: Display labels for the few English dict keys used by older export files.
+_PLAIN_KEY_LABELS = {
+    "location_services_setting_v2": "Einstellung für Standortdienste",
+}
+
+
+#: Meta leaves some labels untranslated (English) in otherwise German exports.
+#: Known ones are mapped to German here; unknown strings are kept as exported.
+_META_ENGLISH_TO_GERMAN = {
+    "Combined number of times you've used these privacy settings":
+        "Gesamtzahl der Verwendungen dieser Datenschutzeinstellungen",
+    "The level of permission Facebook has to use your Camera Roll data for each feature":
+        "Berechtigungsstufe, die Facebook für die Nutzung deiner Kamerarollen-Daten pro Funktion hat",
+    "Dismiss Click": "Schließen-Klick",
+    "Feed Comments": "Feed-Kommentare",
+    "Groups": "Gruppen",
+    "Notes": "Notizen",
+    "Other updates from Facebook": "Weitere Updates von Facebook",
+    "Pages": "Seiten",
+    "Photos": "Fotos",
+    "Translations": "Übersetzungen",
+    "Events": "Veranstaltungen",
+    "Audited translations updates": "Updates zu geprüften Übersetzungen",
+    "Translation task activity": "Aktivität bei Übersetzungsaufgaben",
+    "You being tagged in a video": "Videos, auf denen du markiert wirst",
+}
+_RE_IN_APP_MESSAGE = re.compile(r"^In-app Message\b", re.IGNORECASE)
+
+
 def _clean_text(value) -> str:
-    return eh.fix_latin1_string(str(value)).strip()
+    if isinstance(value, bool):
+        # Match the Richtig / Falsch wording Meta uses for booleans in German exports.
+        return "Richtig" if value else "Falsch"
+    text = eh.fix_latin1_string(str(value)).strip()
+    text = _META_ENGLISH_TO_GERMAN.get(text, text)
+    return _RE_IN_APP_MESSAGE.sub("In-App-Nachricht", text)
 
 
 def _read_json_data(reader: ZipArchiveReader, errors: Counter, path: str):
@@ -2526,7 +2560,7 @@ def _label_value_rows(
             for key, val in node.items():
                 if key in ("media", "fbid", "timestamp"):
                     continue
-                walk(val, path + [_clean_text(key)], date, depth)
+                walk(val, path + [_PLAIN_KEY_LABELS.get(key, _clean_text(key))], date, depth)
             return
         if "label_values" in node:
             ts = node.get("timestamp")
@@ -2717,10 +2751,10 @@ def ad_settings_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame
         }
     """
     return _settings_df(reader, errors, [
-        ("ads_information/instagram_ads_and_businesses/ad_preferences.json", "Ad preferences", {}),
-        ("ads_information/instagram_ads_and_businesses/subscription_for_no_ads.json", "Ad-free subscription", {}),
-        ("ads_information/ads_and_topics/in-app_message.json", "In-app messages", {}),
-        ("apps_and_websites_off_of_instagram/apps_and_websites/your_activity_off_meta_technologies_settings.json", "Off-Meta activity settings", {}),
+        ("ads_information/instagram_ads_and_businesses/ad_preferences.json", "Werbepräferenzen", {}),
+        ("ads_information/instagram_ads_and_businesses/subscription_for_no_ads.json", "Werbefreies Abo", {}),
+        ("ads_information/ads_and_topics/in-app_message.json", "In-App-Nachrichten", {}),
+        ("apps_and_websites_off_of_instagram/apps_and_websites/your_activity_off_meta_technologies_settings.json", "Einstellungen zu Aktivitäten außerhalb von Meta", {}),
     ])
 
 
@@ -2841,7 +2875,7 @@ def consents_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
         }
     """
     return _settings_df(reader, errors, [
-        ("preferences/settings/consents.json", "Consents", {"keep_empty_labels": True}),
+        ("preferences/settings/consents.json", "Einwilligungen", {"keep_empty_labels": True}),
     ])
 
 
@@ -2962,7 +2996,7 @@ def link_history_settings_to_df(reader: ZipArchiveReader, errors: Counter) -> pd
         }
     """
     return _settings_df(reader, errors, [
-        ("logged_information/link_history/your_link_history_settings.json", "Link history setting", {"keep_empty_labels": True}),
+        ("logged_information/link_history/your_link_history_settings.json", "Einstellung für den Link-Verlauf", {"keep_empty_labels": True}),
     ])
 
 
@@ -3074,11 +3108,11 @@ def security_and_login_events_to_df(reader: ZipArchiveReader, errors: Counter) -
     try:
         # string_map_data files: only the event time is used.
         for filename, category, event in [
-            ("login_activity.json", "Login activity", "Login"),
-            ("logout_activity.json", "Logout activity", "Logout"),
-            ("password_change_activity.json", "Password changes", "Password change"),
-            ("signup_details.json", "Sign-up", "Sign-up"),
-            ("last_known_location.json", "Last known location", "Location uploaded"),
+            ("login_activity.json", "Login-Aktivität", "Login"),
+            ("logout_activity.json", "Logout-Aktivität", "Logout"),
+            ("password_change_activity.json", "Passwortänderungen", "Passwortänderung"),
+            ("signup_details.json", "Registrierung", "Registrierung"),
+            ("last_known_location.json", "Letzter bekannter Standort", "Standort hochgeladen"),
         ]:
             data = _read_json_data(reader, errors, base + filename)
             if data is not None:
@@ -3099,7 +3133,7 @@ def security_and_login_events_to_df(reader: ZipArchiveReader, errors: Counter) -
             # The first plain value is the event type (e.g. profile changed).
             event = next((_clean_text(lv["value"]) for lv in label_values
                           if lv.get("value") and not _is_sensitive_value(_clean_text(lv["value"]))), "")
-            rows.append(("Profile activity", event or "Profile activity", date))
+            rows.append(("Profilaktivität", event or "Profilaktivität", date))
             seen.add(date)
 
     except Exception as e:
