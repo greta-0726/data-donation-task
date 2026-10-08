@@ -82,6 +82,8 @@ DDP_CATEGORIES = [
             "videos_watched.json",
             "account_searches.json",
             "profile_searches.json",
+            "recent_searches.json",
+            "word_or_phrase_searches.json",
             "followers_1.json",
             "saved_posts.json",
             "following.json",
@@ -1664,6 +1666,195 @@ def liked_posts_to_df(
         errors[type(e).__name__] += 1
 
     return out
+
+def searches_to_df(
+    reader: ZipArchiveReader,
+    errors: Counter,
+    *,
+    word_or_phrase_filename: str = "word_or_phrase_searches.json",
+    recent_filename: str = "recent_searches.json",
+) -> pd.DataFrame:
+    """Extract Instagram word and phrase searches into one DataFrame.
+
+    Instagram may record the same search in both
+    ``word_or_phrase_searches.json`` and ``recent_searches.json`` a few
+    seconds apart. Records from the word-or-phrase file take precedence;
+    a recent-search record is omitted only when its normalized text matches
+    and its timestamp differs by no more than three seconds.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction. Updated in-place.
+    word_or_phrase_filename:
+        Path inside the zip archive to the word-or-phrase search file.
+    recent_filename:
+        Path inside the zip archive to the recent-search file.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Search``, ``Date``.
+        Empty DataFrame when neither source file is present or parsing fails.
+
+    Table documentation::
+
+        {
+          "summary": "Each row represents a word or phrase searched for by the participant on Instagram. Duplicate records emitted by Instagram's two search-history files are combined when their text matches and their timestamps differ by no more than three seconds.",
+          "source_files": [
+            "word_or_phrase_searches.json",
+            "recent_searches.json"
+          ],
+          "columns": {
+            "Search": "Word or phrase searched for on Instagram.",
+            "Date": "ISO 8601 timestamp of when the search was performed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_searches",
+          "title": {
+            "en": "Your Instagram searches",
+            "nl": "Je Instagram-zoekopdrachten",
+            "de": "Ihre Instagram-Suchen",
+            "pl": "Twoje wyszukiwania na Instagramie",
+            "tr": "Instagram aramaların",
+            "ar": "عمليات بحثك على إنستغرام",
+            "ru": "Ваши поисковые запросы в Instagram",
+            "it": "Le tue ricerche su Instagram",
+            "ro": "Căutările tale pe Instagram",
+            "es": "Tus búsquedas en Instagram",
+            "sq": "Kërkimet e tua në Instagram"
+          },
+          "description": {
+            "en": "List of words or phrases you have searched for on Instagram.",
+            "nl": "Lijst van woorden of woordgroepen waarnaar je op Instagram hebt gezocht.",
+            "de": "Liste der Wörter oder Wortgruppen, nach denen Sie auf Instagram gesucht haben.",
+            "pl": "Lista słów lub wyrażeń wyszukiwanych przez Ciebie na Instagramie.",
+            "tr": "Instagram'da aradığın kelime veya ifadelerin listesi.",
+            "ar": "قائمة بالكلمات أو العبارات التي بحثت عنها على إنستغرام.",
+            "ru": "Список слов или фраз, которые вы искали в Instagram.",
+            "it": "Elenco delle parole o frasi che hai cercato su Instagram.",
+            "ro": "Lista cuvintelor sau expresiilor pe care le-ai căutat pe Instagram.",
+            "es": "Lista de palabras o frases que buscaste en Instagram.",
+            "sq": "Lista e fjalëve ose frazave që ke kërkuar në Instagram."
+          },
+          "headers": {
+            "Search": {
+              "en": "Search",
+              "nl": "Zoekopdracht",
+              "de": "Suche",
+              "pl": "Wyszukiwanie",
+              "tr": "Arama",
+              "ar": "البحث",
+              "ru": "Поисковый запрос",
+              "it": "Ricerca",
+              "ro": "Căutare",
+              "es": "Búsqueda",
+              "sq": "Kërkimi"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+
+    word_result = reader.json(word_or_phrase_filename)
+    recent_result = reader.json(recent_filename)
+
+    if not word_result.found and not recent_result.found:
+        return pd.DataFrame()
+
+    word_searches: list[tuple[str, Any]] = []
+    recent_searches: list[tuple[str, Any]] = []
+
+    try:
+        if word_result.found and isinstance(word_result.data, dict):
+            items = cast(dict, word_result.data).get("searches_keyword", [])
+            for item in items:
+                string_map_data = item.get("string_map_data", {})
+                entries = (
+                    string_map_data.values()
+                    if isinstance(string_map_data, dict)
+                    else []
+                )
+                entries = list(entries)
+                search = next((
+                    eh.fix_latin1_string(str(entry.get("value", ""))).strip()
+                    for entry in entries
+                    if str(entry.get("value", "")).strip()
+                ), "")
+                timestamp = next((
+                    entry.get("timestamp")
+                    for entry in entries
+                    if entry.get("timestamp") not in (None, "", 0)
+                ), "")
+                if search:
+                    word_searches.append((search, timestamp))
+
+        if recent_result.found and isinstance(recent_result.data, list):
+            for item in cast(list, recent_result.data):
+                if not isinstance(item, dict):
+                    continue
+                label_values = item.get("label_values", [])
+                search = next((
+                    eh.fix_latin1_string(str(entry.get("value", ""))).strip()
+                    for entry in label_values
+                    if isinstance(entry, dict)
+                    and str(entry.get("value", "")).strip()
+                ), "")
+                timestamp = next((
+                    entry.get("timestamp_value")
+                    for entry in label_values
+                    if isinstance(entry, dict)
+                    and entry.get("timestamp_value") not in (None, "", 0)
+                ), item.get("timestamp", ""))
+                if search:
+                    recent_searches.append((search, timestamp))
+
+        datapoints = list(word_searches)
+        for search, timestamp in recent_searches:
+            normalized_search = search.casefold().strip()
+            is_duplicate = any(
+                normalized_search == word_search.casefold().strip()
+                and isinstance(timestamp, (int, float))
+                and isinstance(word_timestamp, (int, float))
+                and abs(timestamp - word_timestamp) <= 3
+                for word_search, word_timestamp in word_searches
+            )
+            if not is_duplicate:
+                datapoints.append((search, timestamp))
+
+        out = pd.DataFrame(
+            [
+                (search, eh.epoch_to_iso(timestamp, errors=errors))
+                for search, timestamp in datapoints
+            ],
+            columns=["Search", "Date"],
+        )
+        return _sort_by_date(out, "Date")
+
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+        return pd.DataFrame()
+
 
 def profile_searches_to_df(
     reader: ZipArchiveReader,
@@ -3250,6 +3441,7 @@ EXTRACTOR_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
     "post_comments_to_df": post_comments_to_df,
     "liked_comments_to_df": liked_comments_to_df,
     "liked_posts_to_df": liked_posts_to_df,
+    "searches_to_df": searches_to_df,
     "profile_searches_to_df": profile_searches_to_df,
     "story_likes_to_df": story_likes_to_df,
     "stories_viewed_to_df": stories_viewed_to_df,
