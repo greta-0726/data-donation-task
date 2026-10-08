@@ -3,7 +3,7 @@ import { isTranslatable, Text, Translatable } from './types/elements'
 export const MISSING_TRANSLATION = '?text?'
 
 export const Translator = (function () {
-  let defaultLocale: string = 'nl'
+  let defaultLocale: string = 'en'
 
   function setDefaultLocale (locale: string): void {
     defaultLocale = locale
