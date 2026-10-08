@@ -901,11 +901,12 @@ def posts_viewed_to_df(
               "type": "area",
               "group": {
                 "column": "Date",
-                "dateFormat": "auto"
+                "dateFormat": "auto",
+                "label": "Datum"
               },
               "values": [
                 {
-                  "label": "Count",
+                  "label": "Anzahl",
                   "aggregate": "count"
                 }
               ]
@@ -928,11 +929,11 @@ def posts_viewed_to_df(
               "group": {
                 "column": "Date",
                 "dateFormat": "hour_cycle",
-                "label": "Hour of the day"
+                "label": "Tageszeit"
               },
               "values": [
                 {
-                  "label": "Count"
+                  "label": "Anzahl"
                 }
               ]
             }
@@ -1109,12 +1110,13 @@ def videos_watched_to_df(
               "type": "area",
               "group": {
                 "column": "Date",
-                "dateFormat": "auto"
+                "dateFormat": "auto",
+                "label": "Datum"
               },
               "values": [
                 {
                   "aggregate": "count",
-                  "label": "Count"
+                  "label": "Anzahl"
                 }
               ]
             }
