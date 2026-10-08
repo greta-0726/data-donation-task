@@ -255,3 +255,12 @@ def validate_zip(
         validate.set_current_status_code_by_id(1)
 
     return validate
+
+##adding a helper to detect an html file 
+
+def looks_like_html_export(members: list[str]) -> bool:
+    """True if the archive contains HTML files but no JSON files at all."""
+    lowered = [m.lower() for m in members]
+    has_html = any(m.endswith((".html", ".htm")) for m in lowered)
+    has_json = any(m.endswith(".json") for m in lowered)
+    return has_html and not has_json

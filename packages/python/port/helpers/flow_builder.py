@@ -18,6 +18,25 @@ import port.helpers.uploads as uploads
 
 logger = logging.getLogger(__name__)
 
+# Shown instead of the generic retry text when a participant uploads an
+# HTML data package (platforms opt in via reject_html_exports = True).
+HTML_EXPORT_MESSAGE = props.Translatable({
+    "de": "Es sieht so aus, als hätten Sie Ihre Daten im HTML-Format angefragt. Leider können wir Daten in diesem Format nicht verarbeiten, das tut uns leid! Bitte wiederholen Sie die Datenanfrage und stellen Sie sicher, dass Sie das JSON-Format auswählen - wie das geht, lesen Sie in den Anleitungen zum Anfragen Ihrer Daten (Schritt 6 und 7 in der Anleitung für den Browser, Schritt 10 in der Anleitung für die App).",
+    "en": "It looks like you requested your data in HTML format. Unfortunately, we cannot process data in this format, we are sorry! Please repeat your data request and make sure to select the JSON format. You can find out how in the instructions for requesting your data (steps 6 and 7 in the browser instructions, step 10 in the app instructions).",
+})
+
+# Page header and single button for the HTML-export dialog. The button closes
+# the task and returns the participant to the main page, so there is no
+# "Try again" option here: re-uploading the same HTML package cannot succeed.
+HTML_EXPORT_HEADER = props.Translatable({
+    "de": "Falsches Datenformat",
+    "en": "Wrong data format",
+})
+HTML_EXPORT_CLOSE = props.Translatable({
+    "de": "Schließen",
+    "en": "Close",
+})
+
 
 class TaskIncompleteError(Exception):
     """Flow ended without completion. ScriptWrapper maps this to a nonzero
@@ -45,9 +64,12 @@ class TaskIncompleteError(Exception):
 
 
 class FlowBuilder:
+    reject_html_exports = False  # platforms opt in by setting this to True
+
     def __init__(self, session_id: str, platform_name: str):
         self.session_id = session_id
         self.platform_name = platform_name
+        self._html_export_detected = False
         self._initialize_ui_text()
 
     def _initialize_ui_text(self):
@@ -175,12 +197,29 @@ class FlowBuilder:
             category = getattr(validation, "current_ddp_category", None)
             category_id = getattr(category, "id", "unknown") if category else "unknown"
 
+            # Reset on every upload so a retry with a correct file isn't affected.
+            self._html_export_detected = (
+                self.reject_html_exports
+                and status != 0
+                and validate.looks_like_html_export(validation.archive_members)
+            )
+
             if status == 0:
                 yield from ph.emit_log("info", f"[{self.platform_name}] Validation: valid ({category_id})")
+            elif self._html_export_detected:
+                yield from ph.emit_log("info", f"[{self.platform_name}] Validation: invalid (html export)")
             else:
                 yield from ph.emit_log("info", f"[{self.platform_name}] Validation: invalid")
 
-            # 4. If invalid → retry prompt
+            # 4a. HTML export on an opted-in platform → explain and close.
+            # No retry: the participant has to request a new JSON export first.
+            if self._html_export_detected:
+                logger.info("HTML export for %s; closing task", self.platform_name)
+                _ = yield ph.render_page(HTML_EXPORT_HEADER, self.generate_html_export_prompt())
+                yield from ph.emit_log("info", f"[{self.platform_name}] HTML export dialog closed")
+                raise TaskIncompleteError("abandoned")
+
+            # 4b. Any other invalid file → retry prompt
             if status != 0:
                 logger.info("Invalid %s file; prompting retry", self.platform_name)
                 retry_prompt = self.generate_retry_prompt()
@@ -291,6 +330,13 @@ class FlowBuilder:
     def generate_retry_prompt(self):
         """Generate platform-specific retry prompt."""
         return ph.generate_retry_prompt(self.platform_name)
+
+    def generate_html_export_prompt(self):
+        """Message plus a single "Close" button (no cancel → one button)."""
+        return props.PropsUIPromptConfirm(
+            text=HTML_EXPORT_MESSAGE,
+            ok=HTML_EXPORT_CLOSE,
+        )
 
     def generate_review_data_prompt(self, table_list):
         """Generate platform-specific review data prompt."""
