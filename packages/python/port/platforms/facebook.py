@@ -1692,7 +1692,7 @@ def ads_viewed_to_df(
     Returns
     -------
     pd.DataFrame
-        Columns: ``Ad``, ``Date``.
+        Columns: ``Ad``, ``URL``, ``Date``.
         Empty DataFrame when the file is absent or parsing fails.
 
     Table documentation::
@@ -1701,7 +1701,8 @@ def ads_viewed_to_df(
           "summary": "Each row represents one advertisement viewed by the participant on Facebook and when it was viewed.",
           "source_file": "logged_information/interactions/ads.json",
           "columns": {
-            "Ad": "Advertisement label recorded by Facebook.",
+            "Ad": "Name of the advertiser / ad as recorded by Facebook.",
+            "URL": "Link to the ad content (post, reel or page).",
             "Date": "ISO 8601 timestamp of when the advertisement was viewed."
           }
         }
@@ -1750,6 +1751,19 @@ def ads_viewed_to_df(
               "es": "Anuncio",
               "sq": "Reklama"
             },
+            "URL": {
+              "en": "URL",
+              "nl": "URL",
+              "de": "URL",
+              "pl": "URL",
+              "tr": "URL",
+              "ar": "الرابط",
+              "ru": "URL-адрес",
+              "it": "URL",
+              "ro": "URL",
+              "es": "URL",
+              "sq": "URL"
+            },
             "Date": {
               "en": "Date",
               "nl": "Datum",
@@ -1778,23 +1792,33 @@ def ads_viewed_to_df(
     try:
         for item in cast(list, data):
             ad = ""
+            url = ""
             timestamp = ""
 
             for entry in item.get("label_values", []):
-                if not ad and entry.get("label") and "timestamp_value" not in entry:
-                    ad = eh.fix_latin1_string(entry.get("label", ""))
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("timestamp_value") not in (None, ""):
+                    if timestamp == "":
+                        timestamp = entry.get("timestamp_value", "")
+                elif not ad and (entry.get("value") or entry.get("href")):
+                    # The value is the advertiser / ad name, not the label
+                    # ("Werbeanzeige" / "Ad"), which is the same for every row.
+                    ad = eh.fix_latin1_string(entry.get("value", ""))
+                    url = entry.get("href", "")
 
-                if timestamp == "" and entry.get("timestamp_value") not in (None, ""):
-                    timestamp = entry.get("timestamp_value", "")
+            if not timestamp and item.get("timestamp"):
+                timestamp = item.get("timestamp")
 
             datapoints.append((
                 ad,
+                url,
                 eh.epoch_to_iso(timestamp, errors=errors),
             ))
 
         return pd.DataFrame(
             datapoints,
-            columns=["Ad", "Date"],
+            columns=["Ad", "URL", "Date"],
         )
 
     except Exception as e:
@@ -3836,7 +3860,7 @@ def preference_settings_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.D
 
         {
           "summary": "Each row is one preference or setting from the participant's Facebook preferences (feed, language, login alerts, memorialization, notifications, video, reels, stories, camera roll, device push, autoplay).",
-          "source_file": "preferences/feed/reduce.json and preferences/preferences/*.json (language_settings_history, login_alerts_settings, memorialization_settings, notification_settings, preferred_language, reels_preferences, video_settings, your_camera_roll_controls, your_device_push_settings, your_facebook_story_preferences, your_video_autoplay_settings)",
+          "source_file": "preferences/feed/reduce.json and preferences/preferences/*.json (language_settings_history, login_alerts_settings, memorialization_settings, notification_settings, preferred_language, reels_preferences, video_settings, your_camera_roll_controls, your_device_push_settings, your_facebook_story_preferences, your_video_autoplay_settings, dark_mode_settings, languages_you_may_know, your_accessibility_settings, your_audio_settings, your_fundraiser_settings, your_story_highlights, your_watch_settings)",
           "columns": {
             "Category": "Which Facebook preferences file the row comes from.",
             "Setting": "Name of the preference, as displayed in the participant's Facebook language (nested settings are joined with ' › ').",
@@ -3945,6 +3969,13 @@ def preference_settings_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.D
         (base + "your_camera_roll_controls.json", "Kamerarolle", {}),
         (base + "your_device_push_settings.json", "Push-Einstellungen des Geräts", {}),
         (base + "your_facebook_story_preferences.json", "Storys", {}),
+        (base + "dark_mode_settings.json", "Dunkelmodus", {}),
+        (base + "languages_you_may_know.json", "Sprachen, die Sie vielleicht sprechen", {}),
+        (base + "your_accessibility_settings.json", "Barrierefreiheit", {}),
+        (base + "your_audio_settings.json", "Audio", {}),
+        (base + "your_fundraiser_settings.json", "Spendenaktionen", {}),
+        (base + "your_story_highlights.json", "Story-Highlights", {}),
+        (base + "your_watch_settings.json", "Watch", {}),
     ])
 
 
@@ -5113,6 +5144,2325 @@ def friend_suggestions_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Da
 
 
 # ---------------------------------------------------------------------------
+# Single-file record tables (files also covered by the inference_* pipeline)
+#
+# Each table reads exactly one export file and shows one row per record: the
+# first timestamp of the record as Date, and all remaining fields flattened
+# into Details as "label: value" pairs.  Values that look like identifiers
+# (IP address, e-mail, phone number, cookie, user agent, long numeric ids)
+# are dropped.
+# ---------------------------------------------------------------------------
+
+_RECORD_STRUCT_KEYS = _LV_KEYS | {"string_list_data", "string_map_data", "media_list_data"}
+_RECORD_SKIP_KEYS = {"fbid", "media", "media_list_data", "uri", "thumbnail"}
+
+
+def _standard_records(data) -> list:
+    """Split a parsed JSON file into records (same rules as the inference pipeline)."""
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    if "label_values" in data or "string_map_data" in data:
+        return [data]
+    lists = [value for value in data.values() if isinstance(value, list)]
+    if len(lists) == 1:
+        return lists[0]
+    return [data]
+
+
+def _is_epoch(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _record_timestamp(record):
+    """Return the first (breadth-first) epoch timestamp found in *record*."""
+    queue = [record]
+    while queue:
+        node = queue.pop(0)
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if ("timestamp" in str(key).lower() or key == "time") and _is_epoch(value):
+                    return value
+            queue.extend(node.values())
+        elif isinstance(node, list):
+            queue.extend(node)
+    return None
+
+
+def _record_details(record, errors: Counter, skip_ts=None) -> str:
+    """Flatten *record* into '; '-joined 'label: value' pairs.
+
+    Timestamps equal to *skip_ts* (the record date, shown in its own column)
+    are not repeated.
+    """
+    parts: list[str] = []
+
+    def add(path: list, value, *, is_timestamp: bool = False) -> None:
+        if is_timestamp and value == skip_ts:
+            return
+        text = eh.epoch_to_iso(value, errors=errors) if is_timestamp else _clean_text(value)
+        if not text or _is_sensitive_value(text):
+            return
+        label = _PATH_SEP.join(p for p in path if p)
+        parts.append(f"{label}: {text}" if label else text)
+
+    def walk(node, path: list) -> None:
+        if isinstance(node, list):
+            for child in node:
+                walk(child, path)
+            return
+        if not isinstance(node, dict):
+            add(path, node)
+            return
+        if node.keys() & _RECORD_STRUCT_KEYS:
+            label = node.get("label")
+            title = node.get("title")
+            if not label and title and ("dict" in node or "vec" in node):
+                label = title  # a titled group of labelled values
+            elif title:
+                add(path + ["Titel"], title)
+            new_path = path + [_clean_text(label)] if label else path
+            if "value" in node:
+                add(new_path, node["value"])
+            elif node.get("href"):
+                add(new_path, node["href"])
+            if "value" in node and node.get("href") and node["href"] != node["value"]:
+                add(new_path + ["Link"], node["href"])
+            if _is_epoch(node.get("timestamp_value")):
+                add(new_path, node["timestamp_value"], is_timestamp=True)
+            for key in ("label_values", "string_list_data", "vec", "dict"):
+                if key in node:
+                    walk(node[key], new_path)
+            string_map = node.get("string_map_data")
+            if isinstance(string_map, dict):
+                for key, value in string_map.items():
+                    walk(value, new_path + [_clean_text(key)])
+            return
+        for key, value in node.items():
+            if key in _RECORD_SKIP_KEYS:
+                continue
+            if "timestamp" in str(key).lower():
+                if _is_epoch(value):
+                    add(path + [_clean_text(key)], value, is_timestamp=True)
+                continue
+            walk(value, path + [_clean_text(key)])
+
+    walk(record, [])
+    return "; ".join(parts)
+
+
+def _split_repeated_labels(entries: list) -> list[list]:
+    """Split a flat label_values list into chunks whenever a label repeats.
+
+    Some files (e.g. snoozed or unfollowed profiles) store every entry as
+    consecutive ``Name`` / ``Zeit`` items inside one record.
+    """
+    chunks: list[list] = []
+    current: list = []
+    seen: set = set()
+    for entry in entries:
+        label = entry.get("label") if isinstance(entry, dict) else None
+        if label is not None and label in seen:
+            chunks.append(current)
+            current, seen = [], set()
+        current.append(entry)
+        if label is not None:
+            seen.add(label)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _name_ts_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
+    """``Name / Date`` table for plain ``[{"name": ..., "timestamp": ...}]`` lists."""
+    data = _read_json_data(reader, errors, path)
+    if data is None:
+        return pd.DataFrame()
+    rows: list[tuple[str, str]] = []
+    try:
+        for record in _standard_records(data):
+            if not isinstance(record, dict):
+                continue
+            name = _clean_text(record.get("name") or record.get("title") or "")
+            ts = record.get("timestamp")
+            if name or _is_epoch(ts):
+                rows.append((name, eh.epoch_to_iso(ts, errors=errors) if _is_epoch(ts) else ""))
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+    return pd.DataFrame(rows, columns=["Name", "Date"]) if rows else pd.DataFrame()
+
+
+def _label_pairs_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
+    """``Name / Date`` table for flat, repeating ``label_values`` (Name, Zeit, Name, Zeit, ...).
+
+    Exact duplicates (same name and time), which Meta sometimes exports twice,
+    are listed only once.
+    """
+    data = _read_json_data(reader, errors, path)
+    if data is None:
+        return pd.DataFrame()
+    rows: list[tuple[str, str]] = []
+    seen: set = set()
+    try:
+        for record in _standard_records(data):
+            if not isinstance(record, dict):
+                continue
+            for chunk in _split_repeated_labels(record.get("label_values", [])):
+                name = next((_clean_text(e["value"]) for e in chunk
+                             if isinstance(e, dict) and e.get("value") not in (None, "")), "")
+                ts = next((e["timestamp_value"] for e in chunk
+                           if isinstance(e, dict) and _is_epoch(e.get("timestamp_value"))), None)
+                row = (name, eh.epoch_to_iso(ts, errors=errors) if ts else "")
+                if (name or ts) and row not in seen:
+                    seen.add(row)
+                    rows.append(row)
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+    return pd.DataFrame(rows, columns=["Name", "Date"]) if rows else pd.DataFrame()
+
+
+_BOOL_TEXTS = {"richtig", "falsch", "true", "false", "waar", "onwaar", "vrai", "faux", "vero", "falso", "verdadero"}
+
+
+def _post_audiences_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
+    """``List / Deactivated / Group / Member`` table, one row per list member.
+
+    Lists without members are shown as one row with empty Group and Member.
+    """
+    data = _read_json_data(reader, errors, path)
+    if data is None:
+        return pd.DataFrame()
+    rows: list[tuple[str, str, str, str]] = []
+    try:
+        for record in _standard_records(data):
+            if not isinstance(record, dict):
+                continue
+            list_name, deactivated, members = "", "", []
+            for entry in record.get("label_values", []):
+                if not isinstance(entry, dict):
+                    continue
+                if "dict" in entry:
+                    group = _clean_text(entry.get("title") or entry.get("label") or "")
+                    for member in entry.get("dict") or []:
+                        values = [_clean_text(v["value"]) for v in (member.get("dict") or [member])
+                                  if isinstance(v, dict) and v.get("value") not in (None, "")]
+                        for value in values:
+                            members.append((group, value))
+                elif "value" in entry:
+                    value = entry["value"]
+                    text = _clean_text(value)
+                    if isinstance(value, bool) or text.lower() in _BOOL_TEXTS:
+                        deactivated = text
+                    elif not list_name:
+                        list_name = text
+            if members:
+                rows.extend((list_name, deactivated, group, member) for group, member in members)
+            elif list_name:
+                rows.append((list_name, deactivated, "", ""))
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+    return (pd.DataFrame(rows, columns=["List", "Deactivated", "Group", "Member"])
+            if rows else pd.DataFrame())
+
+
+def _expand_records(record):
+    """Yield ``(group_label, item, fallback_ts)`` rows for one record.
+
+    Meta often stores a whole list (places, profiles, ...) inside a single
+    record as ``label_values -> [{label, vec: [...]}]``.  Each element of such
+    a list becomes its own row, so participants see every entry separately and
+    can deselect it.  Records without such a list are returned as one row.
+    """
+    groups = []
+    if isinstance(record, dict) and isinstance(record.get("label_values"), list):
+        for entry in record["label_values"]:
+            if isinstance(entry, dict) and isinstance(entry.get("vec"), list) and entry["vec"]:
+                groups.append((entry.get("label") or entry.get("title") or "", entry["vec"]))
+    if not groups:
+        entries = record.get("label_values") if isinstance(record, dict) else None
+        if isinstance(entries, list):
+            chunks = _split_repeated_labels(entries)
+            if len(chunks) > 1:
+                for chunk in chunks:
+                    yield "", {"label_values": chunk}, None
+                return
+        yield "", record, None
+        return
+    record_ts = record.get("timestamp") if _is_epoch(record.get("timestamp")) else None
+    show_label = len(groups) > 1
+    for label, items in groups:
+        for item in items:
+            yield (_clean_text(label) if show_label else ""), item, record_ts
+
+
+def _records_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
+    """Build a ``Date / Details`` table from one export file, one row per entry."""
+    data = _read_json_data(reader, errors, path)
+    if data is None:
+        return pd.DataFrame()
+    rows: list[tuple[str, str]] = []
+    try:
+        for record in _standard_records(data):
+            for label, item, fallback_ts in _expand_records(record):
+                ts = _record_timestamp(item) or fallback_ts
+                details = _record_details(item, errors, skip_ts=ts)
+                if label and details:
+                    details = f"{label}: {details}"
+                if not details and ts is None:
+                    continue
+                rows.append((eh.epoch_to_iso(ts, errors=errors) if ts else "", details))
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows, columns=["Date", "Details"])
+
+
+def _count_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
+    """Return a one-cell ``Count`` table with the first number found in *path*."""
+    data = _read_json_data(reader, errors, path)
+    if data is None:
+        return pd.DataFrame()
+    queue = [data]
+    while queue:
+        node = queue.pop(0)
+        if isinstance(node, dict):
+            value = node.get("value")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return pd.DataFrame({"Count": [int(value)]})
+            if isinstance(value, str):
+                digits = re.findall(r"\d+", value)
+                if digits:
+                    return pd.DataFrame({"Count": [int("".join(digits))]})
+            queue.extend(v for k, v in node.items() if "timestamp" not in str(k).lower())
+        elif isinstance(node, list):
+            queue.extend(node)
+    return pd.DataFrame()
+
+
+
+def groups_and_events_youve_visited_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a Facebook group or event the participant visited.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a Facebook group or event the participant visited.",
+          "source_file": "logged_information/interactions/groups_and_events_you've_visited.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_groups_and_events_youve_visited",
+          "title": {
+            "en": "Groups and events you visited",
+            "nl": "Groepen en evenementen die je hebt bezocht",
+            "de": "Besuchte Gruppen und Veranstaltungen",
+            "pl": "Odwiedzone grupy i wydarzenia",
+            "tr": "Ziyaret ettiğin gruplar ve etkinlikler",
+            "ar": "المجموعات والفعاليات التي زرتها",
+            "ru": "Посещённые группы и мероприятия",
+            "it": "Gruppi ed eventi visitati",
+            "ro": "Grupuri și evenimente vizitate",
+            "es": "Grupos y eventos que visitaste",
+            "sq": "Grupet dhe ngjarjet që ke vizituar"
+          },
+          "description": {
+            "en": "This table shows the Facebook groups and events you visited.",
+            "nl": "Deze tabel toont de Facebook-groepen en -evenementen die je hebt bezocht.",
+            "de": "Diese Tabelle zeigt die Facebook-Gruppen und -Veranstaltungen, die Sie besucht haben.",
+            "pl": "Ta tabela pokazuje grupy i wydarzenia na Facebooku, które odwiedziłeś/aś.",
+            "tr": "Bu tablo, ziyaret ettiğin Facebook gruplarını ve etkinliklerini gösterir.",
+            "ar": "يعرض هذا الجدول مجموعات وفعاليات فيسبوك التي زرتها.",
+            "ru": "В этой таблице показаны группы и мероприятия Facebook, которые вы посещали.",
+            "it": "Questa tabella mostra i gruppi e gli eventi di Facebook che hai visitato.",
+            "ro": "Acest tabel arată grupurile și evenimentele de pe Facebook pe care le-ai vizitat.",
+            "es": "Esta tabla muestra los grupos y eventos de Facebook que visitaste.",
+            "sq": "Kjo tabelë tregon grupet dhe ngjarjet në Facebook që ke vizituar."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "logged_information/interactions/groups_and_events_you've_visited.json")
+
+
+def your_comment_edits_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an edit the participant made to one of their Facebook comments.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an edit the participant made to one of their Facebook comments.",
+          "source_file": "your_facebook_activity/comments_and_reactions/your_comment_edits.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_your_comment_edits",
+          "title": {
+            "en": "Your comment edits",
+            "nl": "Bewerkingen van je reacties",
+            "de": "Ihre bearbeiteten Kommentare",
+            "pl": "Twoje edycje komentarzy",
+            "tr": "Yorum düzenlemelerin",
+            "ar": "تعديلات تعليقاتك",
+            "ru": "Ваши изменения комментариев",
+            "it": "Le modifiche ai tuoi commenti",
+            "ro": "Editările comentariilor tale",
+            "es": "Tus ediciones de comentarios",
+            "sq": "Ndryshimet e komenteve të tua"
+          },
+          "description": {
+            "en": "This table shows the edits you made to your comments on Facebook.",
+            "nl": "Deze tabel toont de bewerkingen die je aan je reacties op Facebook hebt gedaan.",
+            "de": "Diese Tabelle zeigt, wie Sie Ihre Kommentare auf Facebook bearbeitet haben.",
+            "pl": "Ta tabela pokazuje edycje Twoich komentarzy na Facebooku.",
+            "tr": "Bu tablo, Facebook'taki yorumlarında yaptığın düzenlemeleri gösterir.",
+            "ar": "يعرض هذا الجدول التعديلات التي أجريتها على تعليقاتك في فيسبوك.",
+            "ru": "В этой таблице показаны изменения, которые вы вносили в свои комментарии на Facebook.",
+            "it": "Questa tabella mostra le modifiche che hai apportato ai tuoi commenti su Facebook.",
+            "ro": "Acest tabel arată editările pe care le-ai făcut comentariilor tale pe Facebook.",
+            "es": "Esta tabla muestra las ediciones que hiciste a tus comentarios en Facebook.",
+            "sq": "Kjo tabelë tregon ndryshimet që ke bërë në komentet e tua në Facebook."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_facebook_activity/comments_and_reactions/your_comment_edits.json")
+
+
+def stories_you_reacted_to_with_a_sticker_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a Facebook Story the participant reacted to with a sticker.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a Facebook Story the participant reacted to with a sticker.",
+          "source_file": "your_facebook_activity/stories/stories_you_reacted_to_with_a_sticker.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_stories_you_reacted_to_with_a_sticker",
+          "title": {
+            "en": "Sticker reactions to stories",
+            "nl": "Stickerreacties op stories",
+            "de": "Sticker-Reaktionen auf Storys",
+            "pl": "Reakcje naklejkami na relacje",
+            "tr": "Hikayelere çıkartma tepkileri",
+            "ar": "التفاعل مع القصص بالملصقات",
+            "ru": "Реакции стикерами на истории",
+            "it": "Reazioni con sticker alle storie",
+            "ro": "Reacții cu stickere la povești",
+            "es": "Reacciones con stickers a historias",
+            "sq": "Reagime me ngjitëse ndaj stories"
+          },
+          "description": {
+            "en": "This table shows the Facebook stories you reacted to with a sticker.",
+            "nl": "Deze tabel toont de Facebook-stories waarop je met een sticker hebt gereageerd.",
+            "de": "Diese Tabelle zeigt die Facebook-Storys, auf die Sie mit einem Sticker reagiert haben.",
+            "pl": "Ta tabela pokazuje relacje na Facebooku, na które zareagowałeś/aś naklejką.",
+            "tr": "Bu tablo, çıkartmayla tepki verdiğin Facebook hikayelerini gösterir.",
+            "ar": "يعرض هذا الجدول قصص فيسبوك التي تفاعلت معها بملصق.",
+            "ru": "В этой таблице показаны истории Facebook, на которые вы отреагировали стикером.",
+            "it": "Questa tabella mostra le storie di Facebook a cui hai reagito con uno sticker.",
+            "ro": "Acest tabel arată poveștile de pe Facebook la care ai reacționat cu un sticker.",
+            "es": "Esta tabla muestra las historias de Facebook a las que reaccionaste con un sticker.",
+            "sq": "Kjo tabelë tregon stories në Facebook ndaj të cilave ke reaguar me ngjitëse."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_facebook_activity/stories/stories_you_reacted_to_with_a_sticker.json")
+
+
+def your_educational_notification_interactions_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an interaction with an educational notice shown in Facebook search.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an interaction with an educational notice shown in Facebook search.",
+          "source_file": "logged_information/search/your_educational_notification_interactions.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_your_educational_notification_interactions",
+          "title": {
+            "en": "Interactions with notices in search",
+            "nl": "Interacties met meldingen in zoeken",
+            "de": "Interaktionen mit Hinweisen in der Suche",
+            "pl": "Interakcje z komunikatami w wyszukiwarce",
+            "tr": "Aramadaki bildirimlerle etkileşimler",
+            "ar": "التفاعلات مع الإشعارات في البحث",
+            "ru": "Взаимодействия с уведомлениями в поиске",
+            "it": "Interazioni con avvisi nella ricerca",
+            "ro": "Interacțiuni cu notificări în căutare",
+            "es": "Interacciones con avisos en la búsqueda",
+            "sq": "Ndërveprime me njoftimet në kërkim"
+          },
+          "description": {
+            "en": "This table shows your interactions with educational notices that Facebook displayed in search.",
+            "nl": "Deze tabel toont je interacties met informatieve meldingen die Facebook in de zoekfunctie heeft getoond.",
+            "de": "Diese Tabelle zeigt Ihre Interaktionen mit Hinweisen, die Facebook in der Suche angezeigt hat.",
+            "pl": "Ta tabela pokazuje Twoje interakcje z komunikatami edukacyjnymi wyświetlanymi przez Facebooka w wyszukiwarce.",
+            "tr": "Bu tablo, Facebook'un aramada gösterdiği bilgilendirici bildirimlerle etkileşimlerini gösterir.",
+            "ar": "يعرض هذا الجدول تفاعلاتك مع الإشعارات التوعوية التي عرضها فيسبوك في البحث.",
+            "ru": "В этой таблице показаны ваши взаимодействия с информационными уведомлениями, которые Facebook показывал в поиске.",
+            "it": "Questa tabella mostra le tue interazioni con gli avvisi informativi mostrati da Facebook nella ricerca.",
+            "ro": "Acest tabel arată interacțiunile tale cu notificările informative afișate de Facebook în căutare.",
+            "es": "Esta tabla muestra tus interacciones con avisos informativos que Facebook mostró en la búsqueda.",
+            "sq": "Kjo tabelë tregon ndërveprimet e tua me njoftimet informuese që Facebook shfaqi në kërkim."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "logged_information/search/your_educational_notification_interactions.json")
+
+
+def received_friend_requests_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a friend request the participant received.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Name``, ``Date``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a friend request the participant received.",
+          "source_file": "connections/friends/received_friend_requests.json",
+          "columns": {
+            "Name": "Name of the person, page or profile.",
+            "Date": "ISO 8601 timestamp of the entry."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_received_friend_requests",
+          "title": {
+            "en": "Friend requests you received",
+            "nl": "Ontvangen vriendschapsverzoeken",
+            "de": "Erhaltene Freundschaftsanfragen",
+            "pl": "Otrzymane zaproszenia do znajomych",
+            "tr": "Aldığın arkadaşlık istekleri",
+            "ar": "طلبات الصداقة التي تلقيتها",
+            "ru": "Полученные запросы в друзья",
+            "it": "Richieste di amicizia ricevute",
+            "ro": "Cereri de prietenie primite",
+            "es": "Solicitudes de amistad recibidas",
+            "sq": "Kërkesat për miqësi që ke marrë"
+          },
+          "description": {
+            "en": "This table shows the friend requests you received on Facebook.",
+            "nl": "Deze tabel toont de vriendschapsverzoeken die je op Facebook hebt ontvangen.",
+            "de": "Diese Tabelle zeigt die Freundschaftsanfragen, die Sie auf Facebook erhalten haben.",
+            "pl": "Ta tabela pokazuje zaproszenia do znajomych otrzymane na Facebooku.",
+            "tr": "Bu tablo, Facebook'ta aldığın arkadaşlık isteklerini gösterir.",
+            "ar": "يعرض هذا الجدول طلبات الصداقة التي تلقيتها على فيسبوك.",
+            "ru": "В этой таблице показаны запросы в друзья, полученные вами на Facebook.",
+            "it": "Questa tabella mostra le richieste di amicizia che hai ricevuto su Facebook.",
+            "ro": "Acest tabel arată cererile de prietenie primite pe Facebook.",
+            "es": "Esta tabla muestra las solicitudes de amistad que recibiste en Facebook.",
+            "sq": "Kjo tabelë tregon kërkesat për miqësi që ke marrë në Facebook."
+          },
+          "headers": {
+            "Name": {
+              "en": "Name",
+              "nl": "Naam",
+              "de": "Name",
+              "pl": "Nazwa",
+              "tr": "Ad",
+              "ar": "الاسم",
+              "ru": "Имя",
+              "it": "Nome",
+              "ro": "Nume",
+              "es": "Nombre",
+              "sq": "Emri"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    return _name_ts_df(reader, errors, "connections/friends/received_friend_requests.json")
+
+
+def sent_friend_requests_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a friend request the participant sent.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Name``, ``Date``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a friend request the participant sent.",
+          "source_file": "connections/friends/sent_friend_requests.json",
+          "columns": {
+            "Name": "Name of the person, page or profile.",
+            "Date": "ISO 8601 timestamp of the entry."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_sent_friend_requests",
+          "title": {
+            "en": "Friend requests you sent",
+            "nl": "Verstuurde vriendschapsverzoeken",
+            "de": "Gesendete Freundschaftsanfragen",
+            "pl": "Wysłane zaproszenia do znajomych",
+            "tr": "Gönderdiğin arkadaşlık istekleri",
+            "ar": "طلبات الصداقة التي أرسلتها",
+            "ru": "Отправленные запросы в друзья",
+            "it": "Richieste di amicizia inviate",
+            "ro": "Cereri de prietenie trimise",
+            "es": "Solicitudes de amistad enviadas",
+            "sq": "Kërkesat për miqësi që ke dërguar"
+          },
+          "description": {
+            "en": "This table shows the friend requests you sent on Facebook.",
+            "nl": "Deze tabel toont de vriendschapsverzoeken die je op Facebook hebt verstuurd.",
+            "de": "Diese Tabelle zeigt die Freundschaftsanfragen, die Sie auf Facebook gesendet haben.",
+            "pl": "Ta tabela pokazuje zaproszenia do znajomych wysłane na Facebooku.",
+            "tr": "Bu tablo, Facebook'ta gönderdiğin arkadaşlık isteklerini gösterir.",
+            "ar": "يعرض هذا الجدول طلبات الصداقة التي أرسلتها على فيسبوك.",
+            "ru": "В этой таблице показаны запросы в друзья, отправленные вами на Facebook.",
+            "it": "Questa tabella mostra le richieste di amicizia che hai inviato su Facebook.",
+            "ro": "Acest tabel arată cererile de prietenie trimise pe Facebook.",
+            "es": "Esta tabla muestra las solicitudes de amistad que enviaste en Facebook.",
+            "sq": "Kjo tabelë tregon kërkesat për miqësi që ke dërguar në Facebook."
+          },
+          "headers": {
+            "Name": {
+              "en": "Name",
+              "nl": "Naam",
+              "de": "Name",
+              "pl": "Nazwa",
+              "tr": "Ad",
+              "ar": "الاسم",
+              "ru": "Имя",
+              "it": "Nome",
+              "ro": "Nume",
+              "es": "Nombre",
+              "sq": "Emri"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    return _name_ts_df(reader, errors, "connections/friends/sent_friend_requests.json")
+
+
+def rejected_friend_requests_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a friend request the participant rejected.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Name``, ``Date``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a friend request the participant rejected.",
+          "source_file": "connections/friends/rejected_friend_requests.json",
+          "columns": {
+            "Name": "Name of the person, page or profile.",
+            "Date": "ISO 8601 timestamp of the entry."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_rejected_friend_requests",
+          "title": {
+            "en": "Friend requests you rejected",
+            "nl": "Geweigerde vriendschapsverzoeken",
+            "de": "Abgelehnte Freundschaftsanfragen",
+            "pl": "Odrzucone zaproszenia do znajomych",
+            "tr": "Reddettiğin arkadaşlık istekleri",
+            "ar": "طلبات الصداقة التي رفضتها",
+            "ru": "Отклонённые запросы в друзья",
+            "it": "Richieste di amicizia rifiutate",
+            "ro": "Cereri de prietenie respinse",
+            "es": "Solicitudes de amistad rechazadas",
+            "sq": "Kërkesat për miqësi që ke refuzuar"
+          },
+          "description": {
+            "en": "This table shows the friend requests you rejected on Facebook.",
+            "nl": "Deze tabel toont de vriendschapsverzoeken die je op Facebook hebt geweigerd.",
+            "de": "Diese Tabelle zeigt die Freundschaftsanfragen, die Sie auf Facebook abgelehnt haben.",
+            "pl": "Ta tabela pokazuje zaproszenia do znajomych odrzucone na Facebooku.",
+            "tr": "Bu tablo, Facebook'ta reddettiğin arkadaşlık isteklerini gösterir.",
+            "ar": "يعرض هذا الجدول طلبات الصداقة التي رفضتها على فيسبوك.",
+            "ru": "В этой таблице показаны запросы в друзья, отклонённые вами на Facebook.",
+            "it": "Questa tabella mostra le richieste di amicizia che hai rifiutato su Facebook.",
+            "ro": "Acest tabel arată cererile de prietenie respinse pe Facebook.",
+            "es": "Esta tabla muestra las solicitudes de amistad que rechazaste en Facebook.",
+            "sq": "Kjo tabelë tregon kërkesat për miqësi që ke refuzuar në Facebook."
+          },
+          "headers": {
+            "Name": {
+              "en": "Name",
+              "nl": "Naam",
+              "de": "Name",
+              "pl": "Nazwa",
+              "tr": "Ad",
+              "ar": "الاسم",
+              "ru": "Имя",
+              "it": "Nome",
+              "ro": "Nume",
+              "es": "Nombre",
+              "sq": "Emri"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    return _name_ts_df(reader, errors, "connections/friends/rejected_friend_requests.json")
+
+
+def removed_friends_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a friend the participant removed.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Name``, ``Date``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a friend the participant removed.",
+          "source_file": "connections/friends/removed_friends.json",
+          "columns": {
+            "Name": "Name of the person, page or profile.",
+            "Date": "ISO 8601 timestamp of the entry."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_removed_friends",
+          "title": {
+            "en": "Friends you removed",
+            "nl": "Verwijderde vrienden",
+            "de": "Entfernte Freund*innen",
+            "pl": "Usunięci znajomi",
+            "tr": "Çıkardığın arkadaşlar",
+            "ar": "الأصدقاء الذين أزلتهم",
+            "ru": "Удалённые друзья",
+            "it": "Amici rimossi",
+            "ro": "Prieteni eliminați",
+            "es": "Amigos que eliminaste",
+            "sq": "Miqtë që ke hequr"
+          },
+          "description": {
+            "en": "This table shows the friends you removed on Facebook.",
+            "nl": "Deze tabel toont de vrienden die je op Facebook hebt verwijderd.",
+            "de": "Diese Tabelle zeigt die Freund*innen, die Sie auf Facebook entfernt haben.",
+            "pl": "Ta tabela pokazuje znajomych usuniętych przez Ciebie na Facebooku.",
+            "tr": "Bu tablo, Facebook'ta çıkardığın arkadaşları gösterir.",
+            "ar": "يعرض هذا الجدول الأصدقاء الذين أزلتهم على فيسبوك.",
+            "ru": "В этой таблице показаны друзья, которых вы удалили на Facebook.",
+            "it": "Questa tabella mostra gli amici che hai rimosso su Facebook.",
+            "ro": "Acest tabel arată prietenii pe care i-ai eliminat pe Facebook.",
+            "es": "Esta tabla muestra los amigos que eliminaste en Facebook.",
+            "sq": "Kjo tabelë tregon miqtë që ke hequr në Facebook."
+          },
+          "headers": {
+            "Name": {
+              "en": "Name",
+              "nl": "Naam",
+              "de": "Name",
+              "pl": "Nazwa",
+              "tr": "Ad",
+              "ar": "الاسم",
+              "ru": "Имя",
+              "it": "Nome",
+              "ro": "Nume",
+              "es": "Nombre",
+              "sq": "Emri"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    return _name_ts_df(reader, errors, "connections/friends/removed_friends.json")
+
+
+def your_post_audiences_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an audience setting the participant used for their posts.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``List``, ``Deactivated``, ``Group``, ``Member``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an audience setting the participant used for their posts.",
+          "source_file": "connections/friends/your_post_audiences.json",
+          "columns": {
+            "List": "Name of the custom audience list.",
+            "Deactivated": "Whether the list is deactivated, as exported.",
+            "Group": "Part of the list the member belongs to (e.g. members, rejected suggested members).",
+            "Member": "Name of the person in the list (empty when the list has no members)."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_your_post_audiences",
+          "title": {
+            "en": "Audiences for your posts",
+            "nl": "Doelgroepen van je berichten",
+            "de": "Zielgruppen Ihrer Beiträge",
+            "pl": "Odbiorcy Twoich postów",
+            "tr": "Gönderilerinin kitleleri",
+            "ar": "جمهور منشوراتك",
+            "ru": "Аудитории ваших публикаций",
+            "it": "Pubblico dei tuoi post",
+            "ro": "Publicul postărilor tale",
+            "es": "Público de tus publicaciones",
+            "sq": "Audienca e postimeve të tua"
+          },
+          "description": {
+            "en": "This table shows which audiences you selected for your Facebook posts.",
+            "nl": "Deze tabel toont welke doelgroepen je voor je Facebook-berichten hebt gekozen.",
+            "de": "Diese Tabelle zeigt, welche Zielgruppen Sie für Ihre Facebook-Beiträge ausgewählt haben.",
+            "pl": "Ta tabela pokazuje, jakich odbiorców wybrałeś/aś dla swoich postów na Facebooku.",
+            "tr": "Bu tablo, Facebook gönderilerin için seçtiğin kitleleri gösterir.",
+            "ar": "يعرض هذا الجدول الجمهور الذي اخترته لمنشوراتك على فيسبوك.",
+            "ru": "В этой таблице показано, какие аудитории вы выбирали для своих публикаций на Facebook.",
+            "it": "Questa tabella mostra quale pubblico hai scelto per i tuoi post su Facebook.",
+            "ro": "Acest tabel arată ce public ai ales pentru postările tale de pe Facebook.",
+            "es": "Esta tabla muestra qué público elegiste para tus publicaciones de Facebook.",
+            "sq": "Kjo tabelë tregon cilën audiencë ke zgjedhur për postimet e tua në Facebook."
+          },
+          "headers": {
+            "List": {
+              "en": "List",
+              "nl": "Lijst",
+              "de": "Liste",
+              "pl": "Lista",
+              "tr": "Liste",
+              "ar": "القائمة",
+              "ru": "Список",
+              "it": "Elenco",
+              "ro": "Listă",
+              "es": "Lista",
+              "sq": "Lista"
+            },
+            "Deactivated": {
+              "en": "Deactivated",
+              "nl": "Gedeactiveerd",
+              "de": "Deaktiviert",
+              "pl": "Dezaktywowana",
+              "tr": "Devre dışı",
+              "ar": "معطّلة",
+              "ru": "Отключён",
+              "it": "Disattivato",
+              "ro": "Dezactivată",
+              "es": "Desactivada",
+              "sq": "Çaktivizuar"
+            },
+            "Group": {
+              "en": "Group",
+              "nl": "Groep",
+              "de": "Gruppe",
+              "pl": "Grupa",
+              "tr": "Grup",
+              "ar": "المجموعة",
+              "ru": "Группа",
+              "it": "Gruppo",
+              "ro": "Grup",
+              "es": "Grupo",
+              "sq": "Grupi"
+            },
+            "Member": {
+              "en": "Member",
+              "nl": "Lid",
+              "de": "Mitglied",
+              "pl": "Członek",
+              "tr": "Üye",
+              "ar": "العضو",
+              "ru": "Участник",
+              "it": "Membro",
+              "ro": "Membru",
+              "es": "Miembro",
+              "sq": "Anëtari"
+            }
+          }
+        }
+    """
+    return _post_audiences_df(reader, errors, "connections/friends/your_post_audiences.json")
+
+
+def locations_of_interest_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a location Facebook associates with the participant's interests.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a location Facebook associates with the participant's interests.",
+          "source_file": "logged_information/other_logged_information/locations_of_interest.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_locations_of_interest",
+          "title": {
+            "en": "Locations of interest",
+            "nl": "Interessante locaties",
+            "de": "Interessante Orte",
+            "pl": "Interesujące lokalizacje",
+            "tr": "İlgi duyulan konumlar",
+            "ar": "المواقع التي تهمك",
+            "ru": "Интересные места",
+            "it": "Luoghi di interesse",
+            "ro": "Locații de interes",
+            "es": "Ubicaciones de interés",
+            "sq": "Vendndodhjet me interes"
+          },
+          "description": {
+            "en": "This table shows locations that Facebook associates with your interests.",
+            "nl": "Deze tabel toont locaties die Facebook met je interesses in verband brengt.",
+            "de": "Diese Tabelle zeigt Orte, die Facebook mit Ihren Interessen in Verbindung bringt.",
+            "pl": "Ta tabela pokazuje lokalizacje, które Facebook wiąże z Twoimi zainteresowaniami.",
+            "tr": "Bu tablo, Facebook'un ilgi alanlarınla ilişkilendirdiği konumları gösterir.",
+            "ar": "يعرض هذا الجدول المواقع التي يربطها فيسبوك باهتماماتك.",
+            "ru": "В этой таблице показаны места, которые Facebook связывает с вашими интересами.",
+            "it": "Questa tabella mostra i luoghi che Facebook associa ai tuoi interessi.",
+            "ro": "Acest tabel arată locațiile pe care Facebook le asociază cu interesele tale.",
+            "es": "Esta tabla muestra las ubicaciones que Facebook asocia con tus intereses.",
+            "sq": "Kjo tabelë tregon vendndodhjet që Facebook lidh me interesat e tua."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "logged_information/other_logged_information/locations_of_interest.json")
+
+
+def apps_detected_from_your_activity_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an app Meta detected from the participant's activity.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an app Meta detected from the participant's activity.",
+          "source_file": "ads_information/apps_detected_from_your_activity.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_apps_detected_from_your_activity",
+          "title": {
+            "en": "Apps detected from your activity",
+            "nl": "Apps herkend uit je activiteit",
+            "de": "Aus Ihren Aktivitäten erkannte Apps",
+            "pl": "Aplikacje wykryte na podstawie aktywności",
+            "tr": "Etkinliğinden tespit edilen uygulamalar",
+            "ar": "التطبيقات المكتشفة من نشاطك",
+            "ru": "Приложения, обнаруженные по вашей активности",
+            "it": "App rilevate dalla tua attività",
+            "ro": "Aplicații detectate din activitatea ta",
+            "es": "Aplicaciones detectadas a partir de tu actividad",
+            "sq": "Aplikacionet e zbuluara nga aktiviteti yt"
+          },
+          "description": {
+            "en": "This table shows apps that Meta detected from your activity.",
+            "nl": "Deze tabel toont apps die Meta uit je activiteit heeft herkend.",
+            "de": "Diese Tabelle zeigt Apps, die Meta aus Ihren Aktivitäten erkannt hat.",
+            "pl": "Ta tabela pokazuje aplikacje, które Meta wykryła na podstawie Twojej aktywności.",
+            "tr": "Bu tablo, Meta'nın etkinliğinden tespit ettiği uygulamaları gösterir.",
+            "ar": "يعرض هذا الجدول التطبيقات التي اكتشفتها Meta من نشاطك.",
+            "ru": "В этой таблице показаны приложения, которые Meta обнаружила по вашей активности.",
+            "it": "Questa tabella mostra le app che Meta ha rilevato dalla tua attività.",
+            "ro": "Acest tabel arată aplicațiile pe care Meta le-a detectat din activitatea ta.",
+            "es": "Esta tabla muestra las aplicaciones que Meta detectó a partir de tu actividad.",
+            "sq": "Kjo tabelë tregon aplikacionet që Meta ka zbuluar nga aktiviteti yt."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "ads_information/apps_detected_from_your_activity.json")
+
+
+def apps_detected_on_your_account_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an app Meta detected on the participant's account.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an app Meta detected on the participant's account.",
+          "source_file": "ads_information/apps_detected_on_your_account.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_apps_detected_on_your_account",
+          "title": {
+            "en": "Apps detected on your account",
+            "nl": "Apps herkend in je account",
+            "de": "In Ihrem Konto erkannte Apps",
+            "pl": "Aplikacje wykryte na Twoim koncie",
+            "tr": "Hesabında tespit edilen uygulamalar",
+            "ar": "التطبيقات المكتشفة في حسابك",
+            "ru": "Приложения, обнаруженные в вашем аккаунте",
+            "it": "App rilevate sul tuo account",
+            "ro": "Aplicații detectate în contul tău",
+            "es": "Aplicaciones detectadas en tu cuenta",
+            "sq": "Aplikacionet e zbuluara në llogarinë tënde"
+          },
+          "description": {
+            "en": "This table shows apps that Meta detected on your account.",
+            "nl": "Deze tabel toont apps die Meta in je account heeft herkend.",
+            "de": "Diese Tabelle zeigt Apps, die Meta in Ihrem Konto erkannt hat.",
+            "pl": "Ta tabela pokazuje aplikacje, które Meta wykryła na Twoim koncie.",
+            "tr": "Bu tablo, Meta'nın hesabında tespit ettiği uygulamaları gösterir.",
+            "ar": "يعرض هذا الجدول التطبيقات التي اكتشفتها Meta في حسابك.",
+            "ru": "В этой таблице показаны приложения, которые Meta обнаружила в вашем аккаунте.",
+            "it": "Questa tabella mostra le app che Meta ha rilevato sul tuo account.",
+            "ro": "Acest tabel arată aplicațiile pe care Meta le-a detectat în contul tău.",
+            "es": "Esta tabla muestra las aplicaciones que Meta detectó en tu cuenta.",
+            "sq": "Kjo tabelë tregon aplikacionet që Meta ka zbuluar në llogarinë tënde."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "ads_information/apps_detected_on_your_account.json")
+
+
+def ads_about_meta_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an ad about Meta shown to the participant.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an ad about Meta shown to the participant.",
+          "source_file": "ads_information/ads_about_meta.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_ads_about_meta",
+          "title": {
+            "en": "Ads about Meta",
+            "nl": "Advertenties over Meta",
+            "de": "Werbung über Meta",
+            "pl": "Reklamy dotyczące Meta",
+            "tr": "Meta hakkındaki reklamlar",
+            "ar": "إعلانات عن Meta",
+            "ru": "Реклама о Meta",
+            "it": "Inserzioni su Meta",
+            "ro": "Reclame despre Meta",
+            "es": "Anuncios sobre Meta",
+            "sq": "Reklama për Meta"
+          },
+          "description": {
+            "en": "This table shows ads about Meta that were shown to you.",
+            "nl": "Deze tabel toont advertenties over Meta die aan je zijn getoond.",
+            "de": "Diese Tabelle zeigt Werbung über Meta, die Ihnen angezeigt wurde.",
+            "pl": "Ta tabela pokazuje reklamy dotyczące Meta, które zostały Ci wyświetlone.",
+            "tr": "Bu tablo, sana gösterilen Meta hakkındaki reklamları gösterir.",
+            "ar": "يعرض هذا الجدول الإعلانات عن Meta التي عُرضت لك.",
+            "ru": "В этой таблице показана реклама о Meta, которую вам показывали.",
+            "it": "Questa tabella mostra le inserzioni su Meta che ti sono state mostrate.",
+            "ro": "Acest tabel arată reclamele despre Meta care ți-au fost afișate.",
+            "es": "Esta tabla muestra los anuncios sobre Meta que se te mostraron.",
+            "sq": "Kjo tabelë tregon reklamat për Meta që të janë shfaqur."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "ads_information/ads_about_meta.json")
+
+
+def meta_ad_library_profiles_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a profile of the participant listed in Meta's Ad Library.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a profile of the participant listed in Meta's Ad Library.",
+          "source_file": "ads_information/meta_ad_library_profiles.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_meta_ad_library_profiles",
+          "title": {
+            "en": "Profiles in the Ad Library",
+            "nl": "Profielen in de advertentiebibliotheek",
+            "de": "Profile in der Werbebibliothek",
+            "pl": "Profile w Bibliotece reklam",
+            "tr": "Reklam Kütüphanesi'ndeki profiller",
+            "ar": "الملفات في مكتبة الإعلانات",
+            "ru": "Профили в Библиотеке рекламы",
+            "it": "Profili nella Libreria inserzioni",
+            "ro": "Profiluri în Biblioteca de reclame",
+            "es": "Perfiles en la Biblioteca de anuncios",
+            "sq": "Profilet në Bibliotekën e reklamave"
+          },
+          "description": {
+            "en": "This table shows your profiles that appear in Meta's Ad Library.",
+            "nl": "Deze tabel toont je profielen die in de advertentiebibliotheek van Meta staan.",
+            "de": "Diese Tabelle zeigt Ihre Profile, die in der Werbebibliothek von Meta erscheinen.",
+            "pl": "Ta tabela pokazuje Twoje profile widoczne w Bibliotece reklam Meta.",
+            "tr": "Bu tablo, Meta'nın Reklam Kütüphanesi'nde görünen profillerini gösterir.",
+            "ar": "يعرض هذا الجدول ملفاتك الشخصية التي تظهر في مكتبة إعلانات Meta.",
+            "ru": "В этой таблице показаны ваши профили, которые есть в Библиотеке рекламы Meta.",
+            "it": "Questa tabella mostra i tuoi profili presenti nella Libreria inserzioni di Meta.",
+            "ro": "Acest tabel arată profilurile tale care apar în Biblioteca de reclame Meta.",
+            "es": "Esta tabla muestra tus perfiles que aparecen en la Biblioteca de anuncios de Meta.",
+            "sq": "Kjo tabelë tregon profilet e tua që shfaqen në Bibliotekën e reklamave të Meta."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "ads_information/meta_ad_library_profiles.json")
+
+
+def off_meta_activity_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a website or app that shared the participant's activity with Meta, with the recorded events.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a website or app that shared the participant's activity with Meta, with the recorded events.",
+          "source_file": "apps_and_websites_off_of_facebook/your_activity_off_meta_technologies.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_off_meta_activity",
+          "title": {
+            "en": "Activity off Meta technologies",
+            "nl": "Activiteit buiten Meta-technologieën",
+            "de": "Aktivitäten außerhalb von Meta-Technologien",
+            "pl": "Aktywność poza technologiami Meta",
+            "tr": "Meta teknolojileri dışındaki etkinlikler",
+            "ar": "النشاط خارج تقنيات Meta",
+            "ru": "Активность вне технологий Meta",
+            "it": "Attività al di fuori delle tecnologie Meta",
+            "ro": "Activitate în afara tehnologiilor Meta",
+            "es": "Actividad fuera de las tecnologías de Meta",
+            "sq": "Aktiviteti jashtë teknologjive të Meta"
+          },
+          "description": {
+            "en": "This table shows which websites and apps shared your activity with Meta.",
+            "nl": "Deze tabel toont welke websites en apps je activiteit met Meta hebben gedeeld.",
+            "de": "Diese Tabelle zeigt, welche Websites und Apps Ihre Aktivitäten mit Meta geteilt haben.",
+            "pl": "Ta tabela pokazuje, które witryny i aplikacje udostępniły Twoją aktywność Meta.",
+            "tr": "Bu tablo, hangi web sitelerinin ve uygulamaların etkinliğini Meta ile paylaştığını gösterir.",
+            "ar": "يعرض هذا الجدول المواقع والتطبيقات التي شاركت نشاطك مع Meta.",
+            "ru": "В этой таблице показано, какие сайты и приложения передавали вашу активность Meta.",
+            "it": "Questa tabella mostra quali siti web e app hanno condiviso la tua attività con Meta.",
+            "ro": "Acest tabel arată ce site-uri și aplicații au partajat activitatea ta cu Meta.",
+            "es": "Esta tabla muestra qué sitios web y aplicaciones compartieron tu actividad con Meta.",
+            "sq": "Kjo tabelë tregon cilat faqe dhe aplikacione kanë ndarë aktivitetin tënd me Meta."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "apps_and_websites_off_of_facebook/your_activity_off_meta_technologies.json")
+
+
+def connected_apps_and_websites_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an app or website connected to the participant's Facebook account.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an app or website connected to the participant's Facebook account.",
+          "source_file": "apps_and_websites_off_of_facebook/connected_apps_and_websites.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_connected_apps_and_websites",
+          "title": {
+            "en": "Connected apps and websites",
+            "nl": "Gekoppelde apps en websites",
+            "de": "Verbundene Apps und Websites",
+            "pl": "Połączone aplikacje i witryny",
+            "tr": "Bağlı uygulamalar ve web siteleri",
+            "ar": "التطبيقات والمواقع المتصلة",
+            "ru": "Подключённые приложения и сайты",
+            "it": "App e siti web collegati",
+            "ro": "Aplicații și site-uri conectate",
+            "es": "Aplicaciones y sitios web conectados",
+            "sq": "Aplikacionet dhe faqet e lidhura"
+          },
+          "description": {
+            "en": "This table shows the apps and websites connected to your Facebook account.",
+            "nl": "Deze tabel toont de apps en websites die aan je Facebook-account zijn gekoppeld.",
+            "de": "Diese Tabelle zeigt die Apps und Websites, die mit Ihrem Facebook-Konto verbunden sind.",
+            "pl": "Ta tabela pokazuje aplikacje i witryny połączone z Twoim kontem na Facebooku.",
+            "tr": "Bu tablo, Facebook hesabına bağlı uygulamaları ve web sitelerini gösterir.",
+            "ar": "يعرض هذا الجدول التطبيقات والمواقع المتصلة بحسابك على فيسبوك.",
+            "ru": "В этой таблице показаны приложения и сайты, подключённые к вашему аккаунту Facebook.",
+            "it": "Questa tabella mostra le app e i siti web collegati al tuo account Facebook.",
+            "ro": "Acest tabel arată aplicațiile și site-urile conectate la contul tău de Facebook.",
+            "es": "Esta tabla muestra las aplicaciones y sitios web conectados a tu cuenta de Facebook.",
+            "sq": "Kjo tabelë tregon aplikacionet dhe faqet e lidhura me llogarinë tënde në Facebook."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "apps_and_websites_off_of_facebook/connected_apps_and_websites.json")
+
+
+def snooze_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a profile, page or group the participant snoozed in their feed.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Name``, ``Date``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a profile, page or group the participant snoozed in their feed.",
+          "source_file": "preferences/feed/snooze.json",
+          "columns": {
+            "Name": "Name of the person, page or profile.",
+            "Date": "ISO 8601 timestamp of the entry. Exact duplicates are listed once."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_snooze",
+          "title": {
+            "en": "Snoozed in your feed",
+            "nl": "Gesnoozed in je feed",
+            "de": "Im Feed pausiert",
+            "pl": "Wyciszone w aktualnościach",
+            "tr": "Akışında ertelenenler",
+            "ar": "ما أوقفته مؤقتًا في آخر الأخبار",
+            "ru": "Временно скрытые в ленте",
+            "it": "Silenziati nel feed",
+            "ro": "Amânate în flux",
+            "es": "Pausados en tu sección de noticias",
+            "sq": "Të pezulluara në feed"
+          },
+          "description": {
+            "en": "This table shows profiles, pages and groups you temporarily snoozed in your Facebook feed.",
+            "nl": "Deze tabel toont profielen, pagina's en groepen die je tijdelijk hebt gesnoozed in je Facebook-feed.",
+            "de": "Diese Tabelle zeigt Profile, Seiten und Gruppen, die Sie in Ihrem Facebook-Feed vorübergehend pausiert haben.",
+            "pl": "Ta tabela pokazuje profile, strony i grupy, które tymczasowo wyciszyłeś/aś w aktualnościach.",
+            "tr": "Bu tablo, Facebook akışında geçici olarak ertelediğin profilleri, sayfaları ve grupları gösterir.",
+            "ar": "يعرض هذا الجدول الملفات والصفحات والمجموعات التي أوقفتها مؤقتًا في آخر الأخبار.",
+            "ru": "В этой таблице показаны профили, страницы и группы, которые вы временно скрыли в ленте Facebook.",
+            "it": "Questa tabella mostra profili, pagine e gruppi che hai silenziato temporaneamente nel feed di Facebook.",
+            "ro": "Acest tabel arată profilurile, paginile și grupurile pe care le-ai amânat temporar în fluxul Facebook.",
+            "es": "Esta tabla muestra los perfiles, páginas y grupos que pausaste temporalmente en tu sección de noticias.",
+            "sq": "Kjo tabelë tregon profilet, faqet dhe grupet që ke pezulluar përkohësisht në feed-in e Facebook."
+          },
+          "headers": {
+            "Name": {
+              "en": "Name",
+              "nl": "Naam",
+              "de": "Name",
+              "pl": "Nazwa",
+              "tr": "Ad",
+              "ar": "الاسم",
+              "ru": "Имя",
+              "it": "Nome",
+              "ro": "Nume",
+              "es": "Nombre",
+              "sq": "Emri"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    return _label_pairs_df(reader, errors, "preferences/feed/snooze.json")
+
+
+def unfollowed_profiles_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a profile the participant unfollowed in their feed.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Name``, ``Date``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a profile the participant unfollowed in their feed.",
+          "source_file": "preferences/feed/unfollowed_profiles.json",
+          "columns": {
+            "Name": "Name of the person, page or profile.",
+            "Date": "ISO 8601 timestamp of the entry. Exact duplicates are listed once."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_unfollowed_profiles",
+          "title": {
+            "en": "Profiles you unfollowed",
+            "nl": "Ontvolgde profielen",
+            "de": "Nicht mehr abonnierte Profile",
+            "pl": "Profile, których już nie obserwujesz",
+            "tr": "Takibi bıraktığın profiller",
+            "ar": "الملفات التي ألغيت متابعتها",
+            "ru": "Профили, от которых вы отписались",
+            "it": "Profili che non segui più",
+            "ro": "Profiluri pe care nu le mai urmărești",
+            "es": "Perfiles que dejaste de seguir",
+            "sq": "Profilet që nuk i ndjek më"
+          },
+          "description": {
+            "en": "This table shows the profiles you unfollowed in your Facebook feed.",
+            "nl": "Deze tabel toont de profielen die je in je Facebook-feed hebt ontvolgd.",
+            "de": "Diese Tabelle zeigt die Profile, die Sie in Ihrem Facebook-Feed nicht mehr abonniert haben.",
+            "pl": "Ta tabela pokazuje profile, których przestałeś/aś obserwować w aktualnościach.",
+            "tr": "Bu tablo, Facebook akışında takibi bıraktığın profilleri gösterir.",
+            "ar": "يعرض هذا الجدول الملفات التي ألغيت متابعتها في آخر الأخبار.",
+            "ru": "В этой таблице показаны профили, от которых вы отписались в ленте Facebook.",
+            "it": "Questa tabella mostra i profili che hai smesso di seguire nel feed di Facebook.",
+            "ro": "Acest tabel arată profilurile pe care nu le mai urmărești în fluxul Facebook.",
+            "es": "Esta tabla muestra los perfiles que dejaste de seguir en tu sección de noticias.",
+            "sq": "Kjo tabelë tregon profilet që ke ndaluar së ndjekuri në feed-in e Facebook."
+          },
+          "headers": {
+            "Name": {
+              "en": "Name",
+              "nl": "Naam",
+              "de": "Name",
+              "pl": "Nazwa",
+              "tr": "Ad",
+              "ar": "الاسم",
+              "ru": "Имя",
+              "it": "Nome",
+              "ro": "Nume",
+              "es": "Nombre",
+              "sq": "Emri"
+            },
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            }
+          }
+        }
+    """
+    return _label_pairs_df(reader, errors, "preferences/feed/unfollowed_profiles.json")
+
+
+def memories_activity_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an activity of the participant in Facebook Memories.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an activity of the participant in Facebook Memories.",
+          "source_file": "preferences/memories/your_activity.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_memories_activity",
+          "title": {
+            "en": "Your activity in Memories",
+            "nl": "Je activiteit in Herinneringen",
+            "de": "Ihre Aktivität in Erinnerungen",
+            "pl": "Twoja aktywność we Wspomnieniach",
+            "tr": "Anılar'daki etkinliğin",
+            "ar": "نشاطك في الذكريات",
+            "ru": "Ваша активность в Воспоминаниях",
+            "it": "La tua attività nei Ricordi",
+            "ro": "Activitatea ta în Amintiri",
+            "es": "Tu actividad en Recuerdos",
+            "sq": "Aktiviteti yt te Kujtimet"
+          },
+          "description": {
+            "en": "This table shows your activity in Facebook Memories.",
+            "nl": "Deze tabel toont je activiteit in Facebook Herinneringen.",
+            "de": "Diese Tabelle zeigt Ihre Aktivität in den Facebook-Erinnerungen.",
+            "pl": "Ta tabela pokazuje Twoją aktywność we Wspomnieniach na Facebooku.",
+            "tr": "Bu tablo, Facebook Anılar'daki etkinliğini gösterir.",
+            "ar": "يعرض هذا الجدول نشاطك في ذكريات فيسبوك.",
+            "ru": "В этой таблице показана ваша активность в Воспоминаниях Facebook.",
+            "it": "Questa tabella mostra la tua attività nei Ricordi di Facebook.",
+            "ro": "Acest tabel arată activitatea ta în Amintirile Facebook.",
+            "es": "Esta tabla muestra tu actividad en los Recuerdos de Facebook.",
+            "sq": "Kjo tabelë tregon aktivitetin tënd te Kujtimet e Facebook."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "preferences/memories/your_activity.json")
+
+
+def story_views_in_past_7_days_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Number of stories the participant viewed in the past 7 days.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Count``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Number of stories the participant viewed in the past 7 days.",
+          "source_file": "ads_information/story_views_in_past_7_days.json",
+          "columns": {
+            "Count": "Number reported by Meta in this file."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_story_views_in_past_7_days",
+          "title": {
+            "en": "Story views in the past 7 days",
+            "nl": "Bekeken stories in de afgelopen 7 dagen",
+            "de": "Story-Aufrufe der letzten 7 Tage",
+            "pl": "Wyświetlenia relacji w ostatnich 7 dniach",
+            "tr": "Son 7 gündeki hikaye görüntülemeleri",
+            "ar": "مشاهدات القصص خلال آخر 7 أيام",
+            "ru": "Просмотры историй за последние 7 дней",
+            "it": "Storie visualizzate negli ultimi 7 giorni",
+            "ro": "Vizualizări de povești în ultimele 7 zile",
+            "es": "Historias vistas en los últimos 7 días",
+            "sq": "Shikimet e stories në 7 ditët e fundit"
+          },
+          "description": {
+            "en": "This table shows how many stories you viewed on Facebook in the past 7 days.",
+            "nl": "Deze tabel toont hoeveel stories je de afgelopen 7 dagen op Facebook hebt bekeken.",
+            "de": "Diese Tabelle zeigt, wie viele Storys Sie in den letzten 7 Tagen auf Facebook angesehen haben.",
+            "pl": "Ta tabela pokazuje, ile relacji wyświetliłeś/aś na Facebooku w ostatnich 7 dniach.",
+            "tr": "Bu tablo, son 7 günde Facebook'ta kaç hikaye görüntülediğini gösterir.",
+            "ar": "يعرض هذا الجدول عدد القصص التي شاهدتها على فيسبوك خلال آخر 7 أيام.",
+            "ru": "В этой таблице показано, сколько историй вы просмотрели на Facebook за последние 7 дней.",
+            "it": "Questa tabella mostra quante storie hai visualizzato su Facebook negli ultimi 7 giorni.",
+            "ro": "Acest tabel arată câte povești ai vizualizat pe Facebook în ultimele 7 zile.",
+            "es": "Esta tabla muestra cuántas historias viste en Facebook en los últimos 7 días.",
+            "sq": "Kjo tabelë tregon sa stories ke parë në Facebook në 7 ditët e fundit."
+          },
+          "headers": {
+            "Count": {
+              "en": "Number of stories",
+              "nl": "Aantal stories",
+              "de": "Anzahl der Storys",
+              "pl": "Liczba relacji",
+              "tr": "Hikaye sayısı",
+              "ar": "عدد القصص",
+              "ru": "Количество историй",
+              "it": "Numero di storie",
+              "ro": "Număr de povești",
+              "es": "Número de historias",
+              "sq": "Numri i stories"
+            }
+          }
+        }
+    """
+    return _count_df(reader, errors, "ads_information/story_views_in_past_7_days.json")
+
+
+def time_spent_watching_facebook_shows_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Time the participant spent watching Facebook shows.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Time the participant spent watching Facebook shows.",
+          "source_file": "logged_information/interactions/time_spent_watching_facebook_shows.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_time_spent_watching_facebook_shows",
+          "title": {
+            "en": "Time spent watching Facebook shows",
+            "nl": "Tijd besteed aan Facebook-shows",
+            "de": "Zeit mit Facebook-Shows",
+            "pl": "Czas oglądania programów na Facebooku",
+            "tr": "Facebook şovlarını izlemeye harcanan süre",
+            "ar": "الوقت المستغرق في مشاهدة عروض فيسبوك",
+            "ru": "Время просмотра шоу на Facebook",
+            "it": "Tempo trascorso a guardare show su Facebook",
+            "ro": "Timp petrecut vizionând emisiuni Facebook",
+            "es": "Tiempo viendo programas de Facebook",
+            "sq": "Koha e kaluar duke parë emisione në Facebook"
+          },
+          "description": {
+            "en": "This table shows how much time you spent watching shows on Facebook.",
+            "nl": "Deze tabel toont hoeveel tijd je hebt besteed aan het bekijken van shows op Facebook.",
+            "de": "Diese Tabelle zeigt, wie viel Zeit Sie mit Shows auf Facebook verbracht haben.",
+            "pl": "Ta tabela pokazuje, ile czasu spędziłeś/aś na oglądaniu programów na Facebooku.",
+            "tr": "Bu tablo, Facebook'ta şov izlemeye ne kadar zaman harcadığını gösterir.",
+            "ar": "يعرض هذا الجدول الوقت الذي قضيته في مشاهدة العروض على فيسبوك.",
+            "ru": "В этой таблице показано, сколько времени вы провели за просмотром шоу на Facebook.",
+            "it": "Questa tabella mostra quanto tempo hai trascorso a guardare show su Facebook.",
+            "ro": "Acest tabel arată cât timp ai petrecut vizionând emisiuni pe Facebook.",
+            "es": "Esta tabla muestra cuánto tiempo pasaste viendo programas en Facebook.",
+            "sq": "Kjo tabelë tregon sa kohë ke kaluar duke parë emisione në Facebook."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "logged_information/interactions/time_spent_watching_facebook_shows.json")
+
+
+def milestone_notifications_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a milestone notification Facebook sent to the participant.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a milestone notification Facebook sent to the participant.",
+          "source_file": "logged_information/activity_messages/milestone_notifications.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "facebook_milestone_notifications",
+          "title": {
+            "en": "Milestone notifications",
+            "nl": "Mijlpaalmeldingen",
+            "de": "Meilenstein-Benachrichtigungen",
+            "pl": "Powiadomienia o kamieniach milowych",
+            "tr": "Dönüm noktası bildirimleri",
+            "ar": "إشعارات المحطات المهمة",
+            "ru": "Уведомления о достижениях",
+            "it": "Notifiche sui traguardi",
+            "ro": "Notificări despre repere",
+            "es": "Notificaciones de hitos",
+            "sq": "Njoftimet për arritjet"
+          },
+          "description": {
+            "en": "This table shows the milestone notifications Facebook sent you.",
+            "nl": "Deze tabel toont de mijlpaalmeldingen die Facebook je heeft gestuurd.",
+            "de": "Diese Tabelle zeigt die Meilenstein-Benachrichtigungen, die Facebook Ihnen gesendet hat.",
+            "pl": "Ta tabela pokazuje powiadomienia o kamieniach milowych, które wysłał Ci Facebook.",
+            "tr": "Bu tablo, Facebook'un sana gönderdiği dönüm noktası bildirimlerini gösterir.",
+            "ar": "يعرض هذا الجدول إشعارات المحطات المهمة التي أرسلها لك فيسبوك.",
+            "ru": "В этой таблице показаны уведомления о достижениях, которые вам отправлял Facebook.",
+            "it": "Questa tabella mostra le notifiche sui traguardi che Facebook ti ha inviato.",
+            "ro": "Acest tabel arată notificările despre repere trimise de Facebook.",
+            "es": "Esta tabla muestra las notificaciones de hitos que Facebook te envió.",
+            "sq": "Kjo tabelë tregon njoftimet për arritjet që të ka dërguar Facebook."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "logged_information/activity_messages/milestone_notifications.json")
+
+
+# ---------------------------------------------------------------------------
 # Extractor registry & platform info
 # ---------------------------------------------------------------------------
 
@@ -5151,6 +7501,28 @@ EXTRACTOR_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
     "link_history_to_df": link_history_to_df,
     "fundraiser_posts_to_df": fundraiser_posts_to_df,
     "friend_suggestions_to_df": friend_suggestions_to_df,
+    "groups_and_events_youve_visited_to_df": groups_and_events_youve_visited_to_df,
+    "your_comment_edits_to_df": your_comment_edits_to_df,
+    "stories_you_reacted_to_with_a_sticker_to_df": stories_you_reacted_to_with_a_sticker_to_df,
+    "your_educational_notification_interactions_to_df": your_educational_notification_interactions_to_df,
+    "received_friend_requests_to_df": received_friend_requests_to_df,
+    "sent_friend_requests_to_df": sent_friend_requests_to_df,
+    "rejected_friend_requests_to_df": rejected_friend_requests_to_df,
+    "removed_friends_to_df": removed_friends_to_df,
+    "your_post_audiences_to_df": your_post_audiences_to_df,
+    "locations_of_interest_to_df": locations_of_interest_to_df,
+    "apps_detected_from_your_activity_to_df": apps_detected_from_your_activity_to_df,
+    "apps_detected_on_your_account_to_df": apps_detected_on_your_account_to_df,
+    "ads_about_meta_to_df": ads_about_meta_to_df,
+    "meta_ad_library_profiles_to_df": meta_ad_library_profiles_to_df,
+    "off_meta_activity_to_df": off_meta_activity_to_df,
+    "connected_apps_and_websites_to_df": connected_apps_and_websites_to_df,
+    "snooze_to_df": snooze_to_df,
+    "unfollowed_profiles_to_df": unfollowed_profiles_to_df,
+    "memories_activity_to_df": memories_activity_to_df,
+    "story_views_in_past_7_days_to_df": story_views_in_past_7_days_to_df,
+    "time_spent_watching_facebook_shows_to_df": time_spent_watching_facebook_shows_to_df,
+    "milestone_notifications_to_df": milestone_notifications_to_df,
 }
 
 
