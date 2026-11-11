@@ -1966,7 +1966,7 @@ def _parse_content_sentence(text) -> tuple[str, str, str]:
     sentence is returned as text.
 
     German possessives drop the genitive "s", which is ambiguous for names
-    that end in "s" themselves (Meta writes "Klaus Beitrag"); those names
+    that end in "s" themselves (Meta writes "Jonas Beitrag"); those names
     lose their final "s".
     """
     text = _clean_text(text) if text is not None else ""
@@ -2076,7 +2076,7 @@ def content_shown_in_feed_to_df(
     Returns
     -------
     pd.DataFrame
-        Columns: ``Author``, ``Type``, ``URL``, ``Date``.
+        Columns: ``Author``, ``Type``, ``Date``.
         Empty DataFrame when the file is absent or parsing fails.
 
     Table documentation::
@@ -2087,7 +2087,6 @@ def content_shown_in_feed_to_df(
           "columns": {
             "Author": "Author of the item, taken from Meta's description (e.g. \"Xs Beitrag\" -> X). Holds the whole description when its wording is not recognised.",
             "Type": "Kind of content: Beitrag, Reel, Video, Foto, Link or Story (from the URL or the wording of the description).",
-            "URL": "URL of the post, video, or link shown in the Feed.",
             "Date": "ISO 8601 timestamp of when the item was shown."
           }
         }
@@ -2148,19 +2147,6 @@ def content_shown_in_feed_to_df(
               "ro": "Tip de conținut",
               "es": "Tipo de contenido",
               "sq": "Lloji i përmbajtjes"
-            },
-            "URL": {
-              "en": "URL",
-              "nl": "URL",
-              "de": "URL",
-              "pl": "URL",
-              "tr": "URL",
-              "ar": "الرابط",
-              "ru": "URL-адрес",
-              "it": "URL",
-              "ro": "URL",
-              "es": "URL",
-              "sq": "URL"
             },
             "Date": {
               "en": "Date",
@@ -2264,7 +2250,7 @@ def recently_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataF
     Returns
     -------
     pd.DataFrame
-        Columns: ``Category``, ``Name``, ``Link``, ``Date``.
+        Columns: ``Category``, ``Name``, ``Date``.
         Empty DataFrame when the file is absent or parsing fails.
 
     Table documentation::
@@ -2275,7 +2261,6 @@ def recently_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataF
           "columns": {
             "Category": "Content category (e.g. Videos, Marketplace).",
             "Name": "Name or title of the viewed item.",
-            "Link": "URL of the viewed item.",
             "Date": "ISO 8601 timestamp of when the item was viewed."
           }
         }
@@ -2336,19 +2321,6 @@ def recently_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataF
               "ro": "Nume",
               "es": "Nombre",
               "sq": "Emri"
-            },
-            "Link": {
-              "en": "Link",
-              "nl": "Link",
-              "de": "Link",
-              "pl": "Link",
-              "tr": "Bağlantı",
-              "ar": "الرابط",
-              "ru": "Ссылка",
-              "it": "Link",
-              "ro": "Link",
-              "es": "Enlace",
-              "sq": "Lidhja"
             },
             "Date": {
               "en": "Date",
@@ -2421,7 +2393,7 @@ def recently_visited_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Data
     Returns
     -------
     pd.DataFrame
-        Columns: ``Category``, ``Name``, ``Link``, ``Date``.
+        Columns: ``Category``, ``Name``, ``Date``.
         Empty DataFrame when the file is absent or parsing fails.
 
     Table documentation::
@@ -2432,7 +2404,6 @@ def recently_visited_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Data
           "columns": {
             "Category": "Category of the visited item.",
             "Name": "Name or title of the visited profile or page.",
-            "Link": "URL of the visited profile or page.",
             "Date": "ISO 8601 timestamp of when the visit occurred."
           }
         }
@@ -2493,19 +2464,6 @@ def recently_visited_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Data
               "ro": "Nume",
               "es": "Nombre",
               "sq": "Emri"
-            },
-            "Link": {
-              "en": "Link",
-              "nl": "Link",
-              "de": "Link",
-              "pl": "Link",
-              "tr": "Bağlantı",
-              "ar": "الرابط",
-              "ru": "Ссылка",
-              "it": "Link",
-              "ro": "Link",
-              "es": "Enlace",
-              "sq": "Lidhja"
             },
             "Date": {
               "en": "Date",
@@ -3381,7 +3339,7 @@ def likes_and_reactions_base_to_df(
     Returns
     -------
     pd.DataFrame
-        Columns: ``Account``, ``Group``, ``Type``, ``Reaction``, ``URL``, ``Timestamp``.
+        Columns: ``Account``, ``Group``, ``Type``, ``Reaction``, ``Timestamp``.
         Empty DataFrame when no matching files are found or parsing fails.
 
     Table documentation::
@@ -3394,7 +3352,6 @@ def likes_and_reactions_base_to_df(
             "Group": "Name of the group the content was posted in (empty when not posted in a group).",
             "Type": "Kind of content: Beitrag, Kommentar, Reel, Video, Foto, Link or Story (from the URL or from Meta's wording).",
             "Reaction": "Type of reaction (e.g. Gefällt mir, Love, Wütend), as exported.",
-            "URL": "URL of the content that was reacted to.",
             "Timestamp": "ISO 8601 timestamp of when the reaction was made."
           }
         }
@@ -3481,19 +3438,6 @@ def likes_and_reactions_base_to_df(
               "ro": "Reacție",
               "es": "Reacción",
               "sq": "Reagimi"
-            },
-            "URL": {
-              "en": "URL",
-              "nl": "URL",
-              "de": "URL",
-              "pl": "URL",
-              "tr": "URL",
-              "ar": "الرابط (URL)",
-              "ru": "URL-адрес",
-              "it": "URL",
-              "ro": "URL",
-              "es": "URL",
-              "sq": "URL"
             },
             "Timestamp": {
               "en": "Date and time",
@@ -5838,6 +5782,8 @@ def link_history_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFram
                     url = lv.get("href") or lv.get("value")
                     break
             ts = item.get("timestamp")
+            if _is_meta_url(url):
+                url = _meta_link_placeholder(url)
             rows.append((url, eh.epoch_to_iso(ts, errors=errors) if ts else ""))
     except Exception as e:
         logger.error("Exception caught: %s", e)
@@ -6110,7 +6056,7 @@ def _record_timestamp(record):
     return None
 
 
-def _record_details(record, errors: Counter, skip_ts=None) -> str:
+def _record_details(record, errors: Counter, skip_ts=None, meta_urls: str = "drop") -> str:
     """Flatten *record* into '; '-joined 'label: value' pairs.
 
     Timestamps equal to *skip_ts* (the record date, shown in its own column)
@@ -6124,6 +6070,10 @@ def _record_details(record, errors: Counter, skip_ts=None) -> str:
         text = eh.epoch_to_iso(value, errors=errors) if is_timestamp else _clean_text(value)
         if not text or _is_sensitive_value(text):
             return
+        if not is_timestamp and meta_urls != "keep" and _is_meta_url(text):
+            if meta_urls != "placeholder":
+                return  # link to a person's content or account
+            text = _meta_link_placeholder(text)
         label = _PATH_SEP.join(p for p in path if p)
         parts.append(f"{label}: {text}" if label else text)
 
@@ -6319,6 +6269,77 @@ def _expand_records(record):
             yield (_clean_text(label) if show_label else ""), item, record_ts
 
 
+
+# ---------------------------------------------------------------------------
+# No URLs that can lead to a person's account
+#
+# The export does not say whether an account is private, so URLs are removed
+# wherever content or accounts of persons may be involved (profiles, posts,
+# reels, comments, ...).  They are kept only where the other side is public by
+# definition: ads, liked Facebook pages and external websites in the link
+# history.
+# ---------------------------------------------------------------------------
+
+_META_HOSTS = (
+    "facebook.com", "fb.com", "fb.me", "fb.watch", "instagram.com", "instagr.am",
+    "threads.net", "messenger.com", "m.me",
+)
+
+
+def _is_meta_url(text) -> bool:
+    """True for a link to Facebook, Instagram, Threads or Messenger."""
+    t = str(text or "").strip().lower()
+    if t.startswith(("http://", "https://")):
+        host = t.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
+    elif t.startswith(("www.", "m.")) or t.split("/", 1)[0] in _META_HOSTS:
+        host = t.split("/", 1)[0]
+    else:
+        return False
+    return any(host == h or host.endswith("." + h) for h in _META_HOSTS)
+
+
+def _meta_link_placeholder(url) -> str:
+    """Keep the fact that a Facebook/Instagram link was opened, not the link."""
+    t = str(url or "").lower()
+    if "instagram.com" in t or "instagr.am" in t:
+        return "Instagram-Link (entfernt)"
+    if "threads.net" in t:
+        return "Threads-Link (entfernt)"
+    return "Facebook-Link (entfernt)"
+
+
+# Generic record tables in which Meta links stay (ads) or become a placeholder.
+_KEEP_META_URL_PATHS: set = set()
+_META_URL_PLACEHOLDER_PATHS: set = set()
+
+# Columns that are removed because they hold links to persons' content or accounts.
+_PERSON_URL_COLUMNS = {
+    "content_shown_in_feed_to_df": [
+        "URL"
+    ],
+    "likes_and_reactions_base_to_df": [
+        "URL"
+    ],
+    "recently_viewed_to_df": [
+        "Link"
+    ],
+    "recently_visited_to_df": [
+        "Link"
+    ]
+}
+
+
+def _without_columns(fn, columns):
+    """Wrap an extractor so that *columns* are not part of its table."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        df = fn(*args, **kwargs)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            df = df.drop(columns=[c for c in columns if c in df.columns])
+        return df
+    return wrapper
+
+
 def _records_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
     """Build a ``Date / Details`` table from one export file, one row per entry."""
     data = _read_json_data(reader, errors, path)
@@ -6329,7 +6350,12 @@ def _records_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.Data
         for record in _standard_records(data):
             for label, item, fallback_ts in _expand_records(record):
                 ts = _record_timestamp(item) or fallback_ts
-                details = _record_details(item, errors, skip_ts=ts)
+                details = _record_details(
+                    item, errors, skip_ts=ts,
+                    meta_urls=("keep" if path in _KEEP_META_URL_PATHS
+                               else "placeholder" if path in _META_URL_PLACEHOLDER_PATHS
+                               else "drop"),
+                )
                 if ts is None and re.fullmatch(r"[^;]*:\s*0", details or ""):
                     # e.g. "Anzahl der Aufrufe: 0" -- nothing happened
                     continue
@@ -8100,17 +8126,17 @@ def memories_activity_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Dat
     Returns
     -------
     pd.DataFrame
-        Columns: ``Date``, ``Details``.
+        Columns: ``Activity``, ``Date``.
         Empty DataFrame when the file is absent or contains no records.
 
     Table documentation::
 
         {
-          "summary": "Each row is an activity of the participant in Facebook Memories.",
+          "summary": "Each row is one activity recorded for Facebook Memories (e.g. the last time the participant visited the Memories page), with the time it last happened.",
           "source_file": "preferences/memories/your_activity.json",
           "columns": {
-            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
-            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+            "Activity": "Name of the activity, as displayed in the participant's Facebook language.",
+            "Date": "ISO 8601 timestamp of the last time it happened; 'Nie' when Meta exports 0 (it never happened). Other values are shown as exported."
           }
         }
 
@@ -8145,36 +8171,59 @@ def memories_activity_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Dat
             "sq": "Kjo tabelë tregon aktivitetin tënd te Kujtimet e Facebook."
           },
           "headers": {
-            "Date": {
-              "en": "Date and time",
-              "nl": "Datum en tijd",
-              "de": "Zeitstempel",
-              "pl": "Data i godzina",
-              "tr": "Tarih ve saat",
-              "ar": "التاريخ والوقت",
-              "ru": "Дата и время",
-              "it": "Data e ora",
-              "ro": "Data și ora",
-              "es": "Fecha y hora",
-              "sq": "Data dhe ora"
+            "Activity": {
+              "en": "Activity",
+              "nl": "Activiteit",
+              "de": "Aktivität",
+              "pl": "Aktywność",
+              "tr": "Etkinlik",
+              "ar": "النشاط",
+              "ru": "Действие",
+              "it": "Attività",
+              "ro": "Activitate",
+              "es": "Actividad",
+              "sq": "Aktiviteti"
             },
-            "Details": {
-              "en": "Details",
-              "nl": "Details",
-              "de": "Details",
-              "pl": "Szczegóły",
-              "tr": "Ayrıntılar",
-              "ar": "التفاصيل",
-              "ru": "Подробности",
-              "it": "Dettagli",
-              "ro": "Detalii",
-              "es": "Detalles",
-              "sq": "Detajet"
+            "Date": {
+              "en": "Last time",
+              "nl": "Laatste keer",
+              "de": "Zuletzt",
+              "pl": "Ostatnio",
+              "tr": "Son kez",
+              "ar": "آخر مرة",
+              "ru": "Последний раз",
+              "it": "Ultima volta",
+              "ro": "Ultima dată",
+              "es": "Última vez",
+              "sq": "Herën e fundit"
             }
           }
         }
     """
-    return _records_df(reader, errors, "preferences/memories/your_activity.json")
+    data = _read_json_data(reader, errors, "preferences/memories/your_activity.json")
+    if data is None:
+        return pd.DataFrame()
+    rows = []
+    try:
+        for record in data if isinstance(data, list) else [data]:
+            if not isinstance(record, dict):
+                continue
+            for entry in record.get("label_values", []):
+                if not isinstance(entry, dict) or not entry.get("label"):
+                    continue
+                if "timestamp_value" in entry:
+                    ts = entry.get("timestamp_value")
+                    # Meta exports 0 when the activity never happened.
+                    value = eh.epoch_to_iso(ts, errors=errors) if _is_epoch(ts) else "Nie"
+                elif entry.get("value") not in (None, ""):
+                    value = _clean_text(entry["value"])
+                else:
+                    continue
+                rows.append((_clean_text(entry["label"]), value))
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+    return pd.DataFrame(rows, columns=["Activity", "Date"]) if rows else pd.DataFrame()
 
 
 def time_spent_watching_facebook_shows_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
@@ -8424,6 +8473,12 @@ EXTRACTOR_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
     "memories_activity_to_df": memories_activity_to_df,
     "time_spent_watching_facebook_shows_to_df": time_spent_watching_facebook_shows_to_df,
     "milestone_notifications_to_df": milestone_notifications_to_df,
+}
+
+# Links to persons' content or accounts are never part of the tables.
+EXTRACTOR_REGISTRY = {
+    name: _without_columns(fn, _PERSON_URL_COLUMNS[name]) if name in _PERSON_URL_COLUMNS else fn
+    for name, fn in EXTRACTOR_REGISTRY.items()
 }
 # Empty tables (no rows, or only empty cells) are never shown to participants.
 EXTRACTOR_REGISTRY = {name: _without_empty_rows(fn) for name, fn in EXTRACTOR_REGISTRY.items()}
