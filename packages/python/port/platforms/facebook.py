@@ -30,6 +30,7 @@ Platform info::
 import functools
 import logging
 import re
+from urllib.parse import urlsplit
 from collections import Counter
 from typing import Callable, cast 
 
@@ -1064,7 +1065,7 @@ def your_search_history_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.D
             denested_dict = eh.dict_denester(item)
 
             datapoints.append((
-                eh.fix_latin1_string(eh.find_item(denested_dict, "text")),
+                _redact_text(eh.fix_latin1_string(eh.find_item(denested_dict, "text"))),
                 eh.epoch_to_iso(eh.find_item(denested_dict, "timestamp"), errors=errors),
             ))
 
@@ -1720,7 +1721,7 @@ def advertisers_interacted_with_to_df(
                     continue
 
                 elif url.startswith(("http://", "https://")):
-                    content_url = url
+                    content_url = _redact_text(url)
 
             datapoints.append((
                 action,
@@ -1883,7 +1884,7 @@ def ads_viewed_to_df(
                     # The value is the advertiser / ad name, not the label
                     # ("Werbeanzeige" / "Ad"), which is the same for every row.
                     ad = eh.fix_latin1_string(entry.get("value", ""))
-                    url = entry.get("href", "")
+                    url = _redact_text(entry.get("href", ""))
 
             if not timestamp and item.get("timestamp"):
                 timestamp = item.get("timestamp")
@@ -1945,8 +1946,8 @@ _PREFIX_RE = re.compile(
     rf"^(?P<noun>{_NOUN_PATTERN})\s+(?:{'|'.join(_OWNER_PREPOSITIONS)})\s+(?P<owner>.+)$", re.IGNORECASE
 )
 
-# Verb phrases around the owner in reaction titles ("X gefällt X's Beitrag.",
-# "X hat auf Xs Beitrag reagiert.", "X likes X's post.").
+# Verb phrases around the owner in reaction titles ("A gefällt Bs Beitrag.",
+# "A hat auf Bs Beitrag reagiert.", "A likes B's post.").
 _REACTION_VERB_PREFIXES = sorted([
     "gefällt", "hat auf", "reagierte auf", "likes", "liked", "loves", "reacted to",
     "vindt", "heeft gereageerd op", "reageerde op", "le gusta", "reaccionó a", "ha reagito a",
@@ -1961,12 +1962,12 @@ _GROUP_TITLES = {"group", "gruppe", "groep", "grupa", "grup", "grupo", "gruppo",
 def _parse_content_sentence(text) -> tuple[str, str, str]:
     """Split a Meta content sentence into ``(owner, content_type, text)``.
 
-    ``"Xs Beitrag: Schöner Tag"`` -> ``("X", "Post", "Schöner Tag")``.
+    ``"Max Mustermanns Beitrag: Schöner Tag"`` -> ``("Max Mustermann", "Post", "Schöner Tag")``.
     When no known pattern matches, owner and type are empty and the whole
     sentence is returned as text.
 
     German possessives drop the genitive "s", which is ambiguous for names
-    that end in "s" themselves (Meta writes "Klaus Beitrag"); those names
+    that end in "s" themselves (Meta writes "Jonas Beitrag"); those names
     lose their final "s".
     """
     text = _clean_text(text) if text is not None else ""
@@ -2085,7 +2086,7 @@ def content_shown_in_feed_to_df(
           "summary": "Each row represents one item that Facebook recorded as having shown in the participant's Feed. The author and content type are taken from Meta's description (e.g. \"Xs Beitrag\").",
           "source_file": "logged_information/interactions/content_that_has_been_shown_to_you_in_your_feed.json",
           "columns": {
-            "Author": "Author of the item, taken from Meta's description (e.g. \"Xs Beitrag\" -> X). Holds the whole description when its wording is not recognised.",
+            "Author": "Author of the item, taken from Meta's description (e.g. \"Max Mustermanns Beitrag\" -> Max Mustermann). Holds the whole description when its wording is not recognised.",
             "Type": "Kind of content: Beitrag, Reel, Video, Foto, Link or Story (from the URL or the wording of the description).",
             "URL": "URL of the post, video, or link shown in the Feed.",
             "Date": "ISO 8601 timestamp of when the item was shown."
@@ -2216,7 +2217,7 @@ def content_shown_in_feed_to_df(
                             isinstance(value, str)
                             and value.startswith(("http://", "https://"))
                         ):
-                            url = eh.fix_latin1_string(href or value)
+                            url = _redact_text(eh.fix_latin1_string(href or value))
                         elif value and not description:
                             description = value
 
@@ -2383,7 +2384,7 @@ def recently_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataF
                     datapoints.append((
                         eh.fix_latin1_string(item.get("name", "")),
                         eh.fix_latin1_string(entry.get("data", {}).get("name", "")),
-                        entry.get("data", {}).get("uri", ""),
+                        _redact_text(entry.get("data", {}).get("uri", "")),
                         eh.epoch_to_iso(entry.get("timestamp", ""), errors=errors)
                     ))
 
@@ -2394,7 +2395,7 @@ def recently_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataF
                         datapoints.append((
                             eh.fix_latin1_string(child.get("name", "")),
                             eh.fix_latin1_string(entry.get("data", {}).get("name", "")),
-                            entry.get("data", {}).get("uri", ""),
+                            _redact_text(entry.get("data", {}).get("uri", "")),
                             eh.epoch_to_iso(entry.get("timestamp", ""), errors=errors)
                         ))
 
@@ -2539,7 +2540,7 @@ def recently_visited_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Data
                     datapoints.append((
                         eh.fix_latin1_string(item.get("name", "")),
                         eh.fix_latin1_string(entry.get("data", {}).get("name", "")),
-                        entry.get("data", {}).get("uri", ""),
+                        _redact_text(entry.get("data", {}).get("uri", "")),
                         eh.epoch_to_iso(entry.get("timestamp", ""), errors=errors)
                     ))
 
@@ -2687,7 +2688,7 @@ def pages_youve_liked_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Dat
 OWN_NAME_PLACEHOLDER = "[Ihr Name]"
 
 # Words that follow the actor's name in Meta's activity titles
-# ("X X hat einen Link gespeichert.", "X X saved a link.").
+# ("Max Mustermann hat einen Link gespeichert.", "Max Mustermann saved a link.").
 _ACTOR_MARKERS = (
     " hat ", " has ", " saved ", " heeft ", " ha ", " a salvat", " a ", " zapisał",
     " guardó ", " salvó ", " сохранил", " ruajti", " kaydetti",
@@ -2813,7 +2814,7 @@ def your_saved_items_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.Data
         own_name = _own_name_in_titles(titles)
         for item, title in zip(items, titles):
             if own_name and title.startswith(own_name):
-                # The participant's own name is not needed ("X ... hat ... gespeichert").
+                # The participant's own name is not needed ("Max Mustermann hat ... gespeichert").
                 title = OWN_NAME_PLACEHOLDER + title[len(own_name):]
             datapoints.append((
                 title,
@@ -3775,6 +3776,93 @@ _RE_HEX_TOKEN = re.compile(r"[0-9a-fA-F]{32,}")
 _RE_LONG_ID = re.compile(r"\d{15,}")
 
 
+
+# ---------------------------------------------------------------------------
+# Redaction rules taken over from inference_facebook.py
+#
+# * Fields whose key matches _PII_EXACT_KEYS / _PII_FIELD_PATTERNS are dropped.
+# * Values whose label matches _PII_EXACT_LABELS (or the patterns) are dropped.
+# * E-mail and IPv4 addresses anywhere in a text are removed.
+# * Facebook/Instagram links that point to a profile rather than to a post,
+#   photo, video, reel, group or the Ad Library are removed.
+# Comments, comment edits, likes/reactions and story reactions are, as in
+# inference_facebook.py, only stripped of Facebook IDs.
+# ---------------------------------------------------------------------------
+
+REDACTED_TEXT = "[entfernt]"
+
+_PII_FIELD_PATTERNS = (
+    "account id", "account_id", "address", "browser cookie", "browser-cookie", "device",
+    "fbid", "full name", "ip address", "ip-adresse", "location", "phone", "profile id",
+    "profile_id", "user id", "user_id", "username", "vanity",
+)
+_PII_EXACT_KEYS = {
+    "fbid", "ip_address", "user_agent", "port", "contact", "ip", "ip-adresse", "author", "actor",
+}
+_PII_EXACT_LABELS = {
+    "account", "account or profile", "active as", "aufgerufen als", "browser cookie",
+    "browser-cookie", "device id", "email", "konto", "konto oder profil", "profile",
+    "profile id", "profil", "user", "user id",
+}
+_RE_EMAIL_IN_TEXT = re.compile(r"(?i)\b[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
+_RE_IPV4_IN_TEXT = re.compile(
+    r"(?<!\d)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?!\d)"
+)
+_PUBLIC_CONTENT_MARKERS = (
+    "/ads/library/", "/groups/", "/photo", "/photos/", "/post/", "/posts/",
+    "/reel/", "/reels/", "/video", "/videos/",
+)
+
+
+def _normalise_key(value) -> str:
+    return re.sub(r"[^a-z0-9_ -]+", "", str(value).casefold()).strip()
+
+
+def _is_pii_field(name) -> bool:
+    key = _normalise_key(name)
+    return key in _PII_EXACT_KEYS or any(p in key for p in _PII_FIELD_PATTERNS)
+
+
+def _is_pii_label(name) -> bool:
+    label = _normalise_key(name)
+    return label in _PII_EXACT_LABELS or _is_pii_field(label)
+
+
+def _is_profile_url(text: str) -> bool:
+    """True for a Facebook/Instagram link that identifies an account, not content."""
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    host = (parts.hostname or "").casefold()
+    if not host.endswith(("facebook.com", "instagram.com")):
+        return False
+    return not any(marker in parts.path.casefold() for marker in _PUBLIC_CONTENT_MARKERS)
+
+
+def _redact_text(text) -> str:
+    """Apply the text rules: e-mail / IP addresses and profile links become [entfernt]."""
+    if text is None:
+        return ""
+    text = str(text)
+    if not text:
+        return text
+    if _RE_EMAIL_IN_TEXT.search(text) or _RE_IPV4_IN_TEXT.search(text):
+        return REDACTED_TEXT
+    if text.startswith(("http://", "https://")) and _is_profile_url(text):
+        return REDACTED_TEXT
+    return text
+
+
+# Files that inference_facebook.py only strips of Facebook IDs.
+_FBID_ONLY_PATHS = {
+    "your_facebook_activity/comments_and_reactions/your_comment_edits.json",
+    "your_facebook_activity/stories/stories_you_reacted_to_with_a_sticker.json",
+}
+
+
 def _is_sensitive_value(value: str) -> bool:
     """Return True if *value* looks like an identifier that must not be donated."""
     v = value.strip()
@@ -3879,6 +3967,10 @@ def _label_value_rows(
         text = _clean_text(value)
         if not text or _is_sensitive_value(text):
             return
+        if not is_timestamp and (
+            _redact_text(text) == REDACTED_TEXT or (path and _is_pii_label(path[-1]))
+        ):
+            return
         setting = _PATH_SEP.join(p for p in path if p) or category
         if is_timestamp:
             # A timestamp *is* the date of the record: show it in the Date column.
@@ -3931,7 +4023,7 @@ def _label_value_rows(
         if not (node.keys() & _LV_KEYS):
             # Plain (old-style) mapping with English keys.
             for key, val in node.items():
-                if key in ("media", "fbid", "timestamp"):
+                if key in ("media", "fbid", "timestamp") or _is_pii_field(key):
                     continue
                 walk(val, path + [_PLAIN_KEY_LABELS.get(key, _clean_text(key))], date, depth)
             return
@@ -5838,7 +5930,7 @@ def link_history_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFram
                     url = lv.get("href") or lv.get("value")
                     break
             ts = item.get("timestamp")
-            rows.append((url, eh.epoch_to_iso(ts, errors=errors) if ts else ""))
+            rows.append((_redact_text(url), eh.epoch_to_iso(ts, errors=errors) if ts else ""))
     except Exception as e:
         logger.error("Exception caught: %s", e)
         errors[type(e).__name__] += 1
@@ -6110,7 +6202,7 @@ def _record_timestamp(record):
     return None
 
 
-def _record_details(record, errors: Counter, skip_ts=None) -> str:
+def _record_details(record, errors: Counter, skip_ts=None, redact: bool = True) -> str:
     """Flatten *record* into '; '-joined 'label: value' pairs.
 
     Timestamps equal to *skip_ts* (the record date, shown in its own column)
@@ -6122,6 +6214,8 @@ def _record_details(record, errors: Counter, skip_ts=None) -> str:
         if is_timestamp and value == skip_ts:
             return
         text = eh.epoch_to_iso(value, errors=errors) if is_timestamp else _clean_text(value)
+        if redact and not is_timestamp and _redact_text(text) == REDACTED_TEXT:
+            return
         if not text or _is_sensitive_value(text):
             return
         label = _PATH_SEP.join(p for p in path if p)
@@ -6143,11 +6237,14 @@ def _record_details(record, errors: Counter, skip_ts=None) -> str:
             elif title:
                 add(path + ["Titel"], title)
             new_path = path + [_clean_text(label)] if label else path
-            if "value" in node:
+            hidden = redact and label and _is_pii_label(label)
+            if hidden:
+                pass  # value belongs to a personal field (e.g. "Konto", "Aufgerufen als")
+            elif "value" in node:
                 add(new_path, node["value"])
             elif node.get("href"):
                 add(new_path, node["href"])
-            if "value" in node and node.get("href") and node["href"] != node["value"]:
+            if not hidden and "value" in node and node.get("href") and node["href"] != node["value"]:
                 add(new_path + ["Link"], node["href"])
             if _is_epoch(node.get("timestamp_value")):
                 add(new_path, node["timestamp_value"], is_timestamp=True)
@@ -6160,7 +6257,7 @@ def _record_details(record, errors: Counter, skip_ts=None) -> str:
                     walk(value, new_path + [_clean_text(key)])
             return
         for key, value in node.items():
-            if key in _RECORD_SKIP_KEYS:
+            if key in _RECORD_SKIP_KEYS or (redact and _is_pii_field(key)):
                 continue
             if "timestamp" in str(key).lower():
                 if _is_epoch(value):
@@ -6329,7 +6426,7 @@ def _records_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.Data
         for record in _standard_records(data):
             for label, item, fallback_ts in _expand_records(record):
                 ts = _record_timestamp(item) or fallback_ts
-                details = _record_details(item, errors, skip_ts=ts)
+                details = _record_details(item, errors, skip_ts=ts, redact=path not in _FBID_ONLY_PATHS)
                 if ts is None and re.fullmatch(r"[^;]*:\s*0", details or ""):
                     # e.g. "Anzahl der Aufrufe: 0" -- nothing happened
                     continue
