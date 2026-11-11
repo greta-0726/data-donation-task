@@ -43,13 +43,29 @@ interface Tooltip {
 // Per-table column widths for tables that need a layout different from the
 // default. Single-column tables are handled automatically below.
 const TABLE_COLUMN_WIDTHS: Record<string, string[]> = {
-  facebook_reels_usage: ['75%', '25%']
+  facebook_reels_usage: ['75%', '25%'],
+  facebook_ad_settings: ['80%', '20%'],
+  facebook_privacy_settings: ['70%', '30%'],
+  facebook_preference_settings: ['20%', '50%', '30%'],
+  facebook_off_meta_settings: ['50%', '25%', '25%'],
+  facebook_unfollowed_profiles: ['70%', '30%'],
+  facebook_snooze: ['70%', '30%'],
+  facebook_hidden_ads: ['20%', '55%', '25%'],
+  facebook_your_post_audiences: ['20%', '10%', '40%', '30%']
 }
 
 // Columns listed here are allowed to wrap instead of being truncated.
 // Single-column tables are handled automatically below.
 const TABLE_WRAP_COLUMNS: Record<string, number[]> = {
-  facebook_reels_usage: [0]
+  facebook_reels_usage: [0],
+  facebook_ad_settings: [0],
+  facebook_privacy_settings: [0, 1],
+  facebook_preference_settings: [1, 2],
+  facebook_off_meta_settings: [0, 1],
+  facebook_unfollowed_profiles: [0],
+  facebook_snooze: [0],
+  facebook_hidden_ads: [1],
+  facebook_your_post_audiences: [2, 3]
 }
 
 export const Table = ({
@@ -355,8 +371,14 @@ function formatDateForDisplay(
   const isGermanLocale = locale.toLowerCase().startsWith('de')
   const isDateColumn = columnName === 'Date' || columnName === 'Timestamp'
   const isIsoTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+  const isoDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
 
-  if (!isGermanLocale || !isDateColumn || !isIsoTimestamp) return value
+  if (!isGermanLocale || !isDateColumn) return value
+
+  // A date without a time (e.g. active days): show the day only, no fake 00:00 time.
+  if (isoDate != null) return `${isoDate[3]}.${isoDate[2]}.${isoDate[1]}`
+
+  if (!isIsoTimestamp) return value
 
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value

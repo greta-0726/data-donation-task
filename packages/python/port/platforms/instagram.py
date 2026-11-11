@@ -3429,6 +3429,2948 @@ def removed_suggestions_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.D
     return pd.DataFrame({"Date": sorted(dates, reverse=True)})
 
 
+# ---------------------------------------------------------------------------
+# Single-file record tables (files also covered by the inference_* pipeline)
+#
+# Each table reads exactly one export file and shows one row per record: the
+# first timestamp of the record as Date, and all remaining fields flattened
+# into Details as "label: value" pairs.  Values that look like identifiers
+# (IP address, e-mail, phone number, cookie, user agent, long numeric ids)
+# are dropped.
+# ---------------------------------------------------------------------------
+
+_RECORD_STRUCT_KEYS = _LV_KEYS | {"string_list_data", "string_map_data", "media_list_data"}
+_RECORD_SKIP_KEYS = {"fbid", "media", "media_list_data", "uri", "thumbnail"}
+
+
+def _standard_records(data) -> list:
+    """Split a parsed JSON file into records (same rules as the inference pipeline)."""
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    if "label_values" in data or "string_map_data" in data:
+        return [data]
+    lists = [value for value in data.values() if isinstance(value, list)]
+    if len(lists) == 1:
+        return lists[0]
+    return [data]
+
+
+def _is_epoch(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _record_timestamp(record):
+    """Return the first (breadth-first) epoch timestamp found in *record*."""
+    queue = [record]
+    while queue:
+        node = queue.pop(0)
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if ("timestamp" in str(key).lower() or key == "time") and _is_epoch(value):
+                    return value
+            queue.extend(node.values())
+        elif isinstance(node, list):
+            queue.extend(node)
+    return None
+
+
+def _record_details(record, errors: Counter, skip_ts=None) -> str:
+    """Flatten *record* into '; '-joined 'label: value' pairs.
+
+    Timestamps equal to *skip_ts* (the record date, shown in its own column)
+    are not repeated.
+    """
+    parts: list[str] = []
+
+    def add(path: list, value, *, is_timestamp: bool = False) -> None:
+        if is_timestamp and value == skip_ts:
+            return
+        text = eh.epoch_to_iso(value, errors=errors) if is_timestamp else _clean_text(value)
+        if not text or _is_sensitive_value(text):
+            return
+        label = _PATH_SEP.join(p for p in path if p)
+        parts.append(f"{label}: {text}" if label else text)
+
+    def walk(node, path: list) -> None:
+        if isinstance(node, list):
+            for child in node:
+                walk(child, path)
+            return
+        if not isinstance(node, dict):
+            add(path, node)
+            return
+        if node.keys() & _RECORD_STRUCT_KEYS:
+            label = node.get("label")
+            title = node.get("title")
+            if not label and title and ("dict" in node or "vec" in node):
+                label = title  # a titled group of labelled values
+            elif title:
+                add(path + ["Titel"], title)
+            new_path = path + [_clean_text(label)] if label else path
+            if "value" in node:
+                add(new_path, node["value"])
+            elif node.get("href"):
+                add(new_path, node["href"])
+            if "value" in node and node.get("href") and node["href"] != node["value"]:
+                add(new_path + ["Link"], node["href"])
+            if _is_epoch(node.get("timestamp_value")):
+                add(new_path, node["timestamp_value"], is_timestamp=True)
+            for key in ("label_values", "string_list_data", "vec", "dict"):
+                if key in node:
+                    walk(node[key], new_path)
+            string_map = node.get("string_map_data")
+            if isinstance(string_map, dict):
+                for key, value in string_map.items():
+                    walk(value, new_path + [_clean_text(key)])
+            return
+        for key, value in node.items():
+            if key in _RECORD_SKIP_KEYS:
+                continue
+            if "timestamp" in str(key).lower():
+                if _is_epoch(value):
+                    add(path + [_clean_text(key)], value, is_timestamp=True)
+                continue
+            walk(value, path + [_clean_text(key)])
+
+    walk(record, [])
+    return "; ".join(parts)
+
+
+def _split_repeated_labels(entries: list) -> list[list]:
+    """Split a flat label_values list into chunks whenever a label repeats.
+
+    Some files (e.g. snoozed or unfollowed profiles) store every entry as
+    consecutive ``Name`` / ``Zeit`` items inside one record.
+    """
+    chunks: list[list] = []
+    current: list = []
+    seen: set = set()
+    for entry in entries:
+        label = entry.get("label") if isinstance(entry, dict) else None
+        if label is not None and label in seen:
+            chunks.append(current)
+            current, seen = [], set()
+        current.append(entry)
+        if label is not None:
+            seen.add(label)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _name_ts_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
+    """``Name / Date`` table for plain ``[{"name": ..., "timestamp": ...}]`` lists."""
+    data = _read_json_data(reader, errors, path)
+    if data is None:
+        return pd.DataFrame()
+    rows: list[tuple[str, str]] = []
+    try:
+        for record in _standard_records(data):
+            if not isinstance(record, dict):
+                continue
+            name = _clean_text(record.get("name") or record.get("title") or "")
+            ts = record.get("timestamp")
+            if name or _is_epoch(ts):
+                rows.append((name, eh.epoch_to_iso(ts, errors=errors) if _is_epoch(ts) else ""))
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+    return pd.DataFrame(rows, columns=["Name", "Date"]) if rows else pd.DataFrame()
+
+
+def _label_pairs_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
+    """``Name / Date`` table for flat, repeating ``label_values`` (Name, Zeit, Name, Zeit, ...).
+
+    Exact duplicates (same name and time), which Meta sometimes exports twice,
+    are listed only once.
+    """
+    data = _read_json_data(reader, errors, path)
+    if data is None:
+        return pd.DataFrame()
+    rows: list[tuple[str, str]] = []
+    seen: set = set()
+    try:
+        for record in _standard_records(data):
+            if not isinstance(record, dict):
+                continue
+            for chunk in _split_repeated_labels(record.get("label_values", [])):
+                name = next((_clean_text(e["value"]) for e in chunk
+                             if isinstance(e, dict) and e.get("value") not in (None, "")), "")
+                ts = next((e["timestamp_value"] for e in chunk
+                           if isinstance(e, dict) and _is_epoch(e.get("timestamp_value"))), None)
+                row = (name, eh.epoch_to_iso(ts, errors=errors) if ts else "")
+                if (name or ts) and row not in seen:
+                    seen.add(row)
+                    rows.append(row)
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+    return pd.DataFrame(rows, columns=["Name", "Date"]) if rows else pd.DataFrame()
+
+
+_BOOL_TEXTS = {"richtig", "falsch", "true", "false", "waar", "onwaar", "vrai", "faux", "vero", "falso", "verdadero"}
+
+
+def _post_audiences_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
+    """``List / Deactivated / Group / Member`` table, one row per list member.
+
+    Lists without members are shown as one row with empty Group and Member.
+    """
+    data = _read_json_data(reader, errors, path)
+    if data is None:
+        return pd.DataFrame()
+    rows: list[tuple[str, str, str, str]] = []
+    try:
+        for record in _standard_records(data):
+            if not isinstance(record, dict):
+                continue
+            list_name, deactivated, members = "", "", []
+            for entry in record.get("label_values", []):
+                if not isinstance(entry, dict):
+                    continue
+                if "dict" in entry:
+                    group = _clean_text(entry.get("title") or entry.get("label") or "")
+                    for member in entry.get("dict") or []:
+                        values = [_clean_text(v["value"]) for v in (member.get("dict") or [member])
+                                  if isinstance(v, dict) and v.get("value") not in (None, "")]
+                        for value in values:
+                            members.append((group, value))
+                elif "value" in entry:
+                    value = entry["value"]
+                    text = _clean_text(value)
+                    if isinstance(value, bool) or text.lower() in _BOOL_TEXTS:
+                        deactivated = text
+                    elif not list_name:
+                        list_name = text
+            if members:
+                rows.extend((list_name, deactivated, group, member) for group, member in members)
+            elif list_name:
+                rows.append((list_name, deactivated, "", ""))
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+    return (pd.DataFrame(rows, columns=["List", "Deactivated", "Group", "Member"])
+            if rows else pd.DataFrame())
+
+
+def _expand_records(record):
+    """Yield ``(group_label, item, fallback_ts)`` rows for one record.
+
+    Meta often stores a whole list (places, profiles, ...) inside a single
+    record as ``label_values -> [{label, vec: [...]}]``.  Each element of such
+    a list becomes its own row, so participants see every entry separately and
+    can deselect it.  Records without such a list are returned as one row.
+    """
+    groups = []
+    if isinstance(record, dict) and isinstance(record.get("label_values"), list):
+        for entry in record["label_values"]:
+            if isinstance(entry, dict) and isinstance(entry.get("vec"), list) and entry["vec"]:
+                groups.append((entry.get("label") or entry.get("title") or "", entry["vec"]))
+    if not groups:
+        entries = record.get("label_values") if isinstance(record, dict) else None
+        if isinstance(entries, list):
+            chunks = _split_repeated_labels(entries)
+            if len(chunks) > 1:
+                for chunk in chunks:
+                    yield "", {"label_values": chunk}, None
+                return
+        yield "", record, None
+        return
+    record_ts = record.get("timestamp") if _is_epoch(record.get("timestamp")) else None
+    show_label = len(groups) > 1
+    for label, items in groups:
+        for item in items:
+            yield (_clean_text(label) if show_label else ""), item, record_ts
+
+
+def _records_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
+    """Build a ``Date / Details`` table from one export file, one row per entry."""
+    data = _read_json_data(reader, errors, path)
+    if data is None:
+        return pd.DataFrame()
+    rows: list[tuple[str, str]] = []
+    try:
+        for record in _standard_records(data):
+            for label, item, fallback_ts in _expand_records(record):
+                ts = _record_timestamp(item) or fallback_ts
+                details = _record_details(item, errors, skip_ts=ts)
+                if label and details:
+                    details = f"{label}: {details}"
+                if not details and ts is None:
+                    continue
+                rows.append((eh.epoch_to_iso(ts, errors=errors) if ts else "", details))
+    except Exception as e:
+        logger.error("Exception caught: %s", e)
+        errors[type(e).__name__] += 1
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows, columns=["Date", "Details"])
+
+
+def _count_df(reader: ZipArchiveReader, errors: Counter, path: str) -> pd.DataFrame:
+    """Return a one-cell ``Count`` table with the first number found in *path*."""
+    data = _read_json_data(reader, errors, path)
+    if data is None:
+        return pd.DataFrame()
+    queue = [data]
+    while queue:
+        node = queue.pop(0)
+        if isinstance(node, dict):
+            value = node.get("value")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return pd.DataFrame({"Count": [int(value)]})
+            if isinstance(value, str):
+                digits = re.findall(r"\d+", value)
+                if digits:
+                    return pd.DataFrame({"Count": [int("".join(digits))]})
+            queue.extend(v for k, v in node.items() if "timestamp" not in str(k).lower())
+        elif isinstance(node, list):
+            queue.extend(node)
+    return pd.DataFrame()
+
+
+
+def hype_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a hype comment of the participant.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a hype comment of the participant.",
+          "source_file": "your_instagram_activity/comments/hype.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_hype",
+          "title": {
+            "en": "Hype comments",
+            "nl": "Hype-reacties",
+            "de": "Hype-Kommentare",
+            "pl": "Komentarze Hype",
+            "tr": "Hype yorumları",
+            "ar": "تعليقات Hype",
+            "ru": "Комментарии Hype",
+            "it": "Commenti Hype",
+            "ro": "Comentarii Hype",
+            "es": "Comentarios Hype",
+            "sq": "Komentet Hype"
+          },
+          "description": {
+            "en": "This table shows your hype comments on Instagram.",
+            "nl": "Deze tabel toont je hype-reacties op Instagram.",
+            "de": "Diese Tabelle zeigt Ihre Hype-Kommentare auf Instagram.",
+            "pl": "Ta tabela pokazuje Twoje komentarze Hype na Instagramie.",
+            "tr": "Bu tablo, Instagram'daki hype yorumlarını gösterir.",
+            "ar": "يعرض هذا الجدول تعليقات Hype الخاصة بك على إنستغرام.",
+            "ru": "В этой таблице показаны ваши комментарии Hype в Instagram.",
+            "it": "Questa tabella mostra i tuoi commenti Hype su Instagram.",
+            "ro": "Acest tabel arată comentariile tale Hype pe Instagram.",
+            "es": "Esta tabla muestra tus comentarios Hype en Instagram.",
+            "sq": "Kjo tabelë tregon komentet e tua Hype në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_instagram_activity/comments/hype.json")
+
+
+def reels_comments_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a comment the participant posted on a Reel.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a comment the participant posted on a Reel.",
+          "source_file": "your_instagram_activity/comments/reels_comments.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_reels_comments",
+          "title": {
+            "en": "Reels comments",
+            "nl": "Reacties op Reels",
+            "de": "Reels-Kommentare",
+            "pl": "Komentarze do rolek",
+            "tr": "Reels yorumları",
+            "ar": "التعليقات على Reels",
+            "ru": "Комментарии к Reels",
+            "it": "Commenti ai Reels",
+            "ro": "Comentarii la Reels",
+            "es": "Comentarios en Reels",
+            "sq": "Komentet në Reels"
+          },
+          "description": {
+            "en": "This table shows the comments you posted on Reels.",
+            "nl": "Deze tabel toont de reacties die je op Reels hebt geplaatst.",
+            "de": "Diese Tabelle zeigt die Kommentare, die Sie zu Reels verfasst haben.",
+            "pl": "Ta tabela pokazuje komentarze, które dodałeś/aś do rolek.",
+            "tr": "Bu tablo, Reels'e yaptığın yorumları gösterir.",
+            "ar": "يعرض هذا الجدول التعليقات التي نشرتها على Reels.",
+            "ru": "В этой таблице показаны комментарии, которые вы оставили к Reels.",
+            "it": "Questa tabella mostra i commenti che hai pubblicato sui Reels.",
+            "ro": "Acest tabel arată comentariile pe care le-ai publicat la Reels.",
+            "es": "Esta tabla muestra los comentarios que publicaste en Reels.",
+            "sq": "Kjo tabelë tregon komentet që ke publikuar në Reels."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_instagram_activity/comments/reels_comments.json")
+
+
+def saved_collections_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a saved collection or an item in it.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a saved collection or an item in it.",
+          "source_file": "your_instagram_activity/saved/saved_collections.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_saved_collections",
+          "title": {
+            "en": "Saved collections",
+            "nl": "Opgeslagen collecties",
+            "de": "Gespeicherte Sammlungen",
+            "pl": "Zapisane kolekcje",
+            "tr": "Kaydedilen koleksiyonlar",
+            "ar": "المجموعات المحفوظة",
+            "ru": "Сохранённые подборки",
+            "it": "Raccolte salvate",
+            "ro": "Colecții salvate",
+            "es": "Colecciones guardadas",
+            "sq": "Koleksionet e ruajtura"
+          },
+          "description": {
+            "en": "This table shows your saved collections on Instagram.",
+            "nl": "Deze tabel toont je opgeslagen collecties op Instagram.",
+            "de": "Diese Tabelle zeigt Ihre gespeicherten Sammlungen auf Instagram.",
+            "pl": "Ta tabela pokazuje Twoje zapisane kolekcje na Instagramie.",
+            "tr": "Bu tablo, Instagram'da kaydettiğin koleksiyonları gösterir.",
+            "ar": "يعرض هذا الجدول مجموعاتك المحفوظة على إنستغرام.",
+            "ru": "В этой таблице показаны ваши сохранённые подборки в Instagram.",
+            "it": "Questa tabella mostra le tue raccolte salvate su Instagram.",
+            "ro": "Acest tabel arată colecțiile tale salvate pe Instagram.",
+            "es": "Esta tabla muestra tus colecciones guardadas en Instagram.",
+            "sq": "Kjo tabelë tregon koleksionet e tua të ruajtura në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_instagram_activity/saved/saved_collections.json")
+
+
+def instants_interactions_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an interaction with Instagram Instants.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an interaction with Instagram Instants.",
+          "source_file": "your_instagram_activity/instants/instants_interactions.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_instants_interactions",
+          "title": {
+            "en": "Instants interactions",
+            "nl": "Interacties met Instants",
+            "de": "Instants-Interaktionen",
+            "pl": "Interakcje z Instants",
+            "tr": "Instants etkileşimleri",
+            "ar": "التفاعلات مع Instants",
+            "ru": "Взаимодействия с Instants",
+            "it": "Interazioni con Instants",
+            "ro": "Interacțiuni cu Instants",
+            "es": "Interacciones con Instants",
+            "sq": "Ndërveprimet me Instants"
+          },
+          "description": {
+            "en": "This table shows your interactions with Instants on Instagram.",
+            "nl": "Deze tabel toont je interacties met Instants op Instagram.",
+            "de": "Diese Tabelle zeigt Ihre Interaktionen mit Instants auf Instagram.",
+            "pl": "Ta tabela pokazuje Twoje interakcje z Instants na Instagramie.",
+            "tr": "Bu tablo, Instagram'daki Instants etkileşimlerini gösterir.",
+            "ar": "يعرض هذا الجدول تفاعلاتك مع Instants على إنستغرام.",
+            "ru": "В этой таблице показаны ваши взаимодействия с Instants в Instagram.",
+            "it": "Questa tabella mostra le tue interazioni con Instants su Instagram.",
+            "ro": "Acest tabel arată interacțiunile tale cu Instants pe Instagram.",
+            "es": "Esta tabla muestra tus interacciones con Instants en Instagram.",
+            "sq": "Kjo tabelë tregon ndërveprimet e tua me Instants në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_instagram_activity/instants/instants_interactions.json")
+
+
+def emoji_story_reactions_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an emoji reaction of the participant to a Story.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an emoji reaction of the participant to a Story.",
+          "source_file": "your_instagram_activity/story_interactions/emoji_story_reactions.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_emoji_story_reactions",
+          "title": {
+            "en": "Emoji reactions to stories",
+            "nl": "Emoji-reacties op stories",
+            "de": "Emoji-Reaktionen auf Storys",
+            "pl": "Reakcje emoji na relacje",
+            "tr": "Hikayelere emoji tepkileri",
+            "ar": "التفاعل مع القصص بالرموز التعبيرية",
+            "ru": "Эмодзи-реакции на истории",
+            "it": "Reazioni emoji alle storie",
+            "ro": "Reacții emoji la povești",
+            "es": "Reacciones con emojis a historias",
+            "sq": "Reagime me emoji ndaj stories"
+          },
+          "description": {
+            "en": "This table shows the stories you reacted to with an emoji.",
+            "nl": "Deze tabel toont de stories waarop je met een emoji hebt gereageerd.",
+            "de": "Diese Tabelle zeigt die Storys, auf die Sie mit einem Emoji reagiert haben.",
+            "pl": "Ta tabela pokazuje relacje, na które zareagowałeś/aś emoji.",
+            "tr": "Bu tablo, emoji ile tepki verdiğin hikayeleri gösterir.",
+            "ar": "يعرض هذا الجدول القصص التي تفاعلت معها برمز تعبيري.",
+            "ru": "В этой таблице показаны истории, на которые вы отреагировали эмодзи.",
+            "it": "Questa tabella mostra le storie a cui hai reagito con un'emoji.",
+            "ro": "Acest tabel arată poveștile la care ai reacționat cu un emoji.",
+            "es": "Esta tabla muestra las historias a las que reaccionaste con un emoji.",
+            "sq": "Kjo tabelë tregon stories ndaj të cilave ke reaguar me emoji."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_instagram_activity/story_interactions/emoji_story_reactions.json")
+
+
+def polls_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a Story poll the participant answered.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a Story poll the participant answered.",
+          "source_file": "your_instagram_activity/story_interactions/polls.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_polls",
+          "title": {
+            "en": "Story polls",
+            "nl": "Story-polls",
+            "de": "Story-Umfragen",
+            "pl": "Ankiety w relacjach",
+            "tr": "Hikaye anketleri",
+            "ar": "استطلاعات القصص",
+            "ru": "Опросы в историях",
+            "it": "Sondaggi nelle storie",
+            "ro": "Sondaje în povești",
+            "es": "Encuestas en historias",
+            "sq": "Sondazhet në stories"
+          },
+          "description": {
+            "en": "This table shows the story polls you answered.",
+            "nl": "Deze tabel toont de story-polls die je hebt beantwoord.",
+            "de": "Diese Tabelle zeigt die Story-Umfragen, an denen Sie teilgenommen haben.",
+            "pl": "Ta tabela pokazuje ankiety w relacjach, na które odpowiedziałeś/aś.",
+            "tr": "Bu tablo, yanıtladığın hikaye anketlerini gösterir.",
+            "ar": "يعرض هذا الجدول استطلاعات القصص التي أجبت عنها.",
+            "ru": "В этой таблице показаны опросы в историях, в которых вы участвовали.",
+            "it": "Questa tabella mostra i sondaggi nelle storie a cui hai risposto.",
+            "ro": "Acest tabel arată sondajele din povești la care ai răspuns.",
+            "es": "Esta tabla muestra las encuestas de historias que respondiste.",
+            "sq": "Kjo tabelë tregon sondazhet në stories që ke plotësuar."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_instagram_activity/story_interactions/polls.json")
+
+
+def quizzes_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a Story quiz the participant answered.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a Story quiz the participant answered.",
+          "source_file": "your_instagram_activity/story_interactions/quizzes.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_quizzes",
+          "title": {
+            "en": "Story quizzes",
+            "nl": "Story-quizzen",
+            "de": "Story-Quiz",
+            "pl": "Quizy w relacjach",
+            "tr": "Hikaye testleri",
+            "ar": "اختبارات القصص",
+            "ru": "Викторины в историях",
+            "it": "Quiz nelle storie",
+            "ro": "Chestionare în povești",
+            "es": "Cuestionarios en historias",
+            "sq": "Kuizet në stories"
+          },
+          "description": {
+            "en": "This table shows the story quizzes you answered.",
+            "nl": "Deze tabel toont de story-quizzen die je hebt beantwoord.",
+            "de": "Diese Tabelle zeigt die Story-Quiz, die Sie beantwortet haben.",
+            "pl": "Ta tabela pokazuje quizy w relacjach, na które odpowiedziałeś/aś.",
+            "tr": "Bu tablo, yanıtladığın hikaye testlerini gösterir.",
+            "ar": "يعرض هذا الجدول اختبارات القصص التي أجبت عنها.",
+            "ru": "В этой таблице показаны викторины в историях, на которые вы ответили.",
+            "it": "Questa tabella mostra i quiz nelle storie a cui hai risposto.",
+            "ro": "Acest tabel arată chestionarele din povești la care ai răspuns.",
+            "es": "Esta tabla muestra los cuestionarios de historias que respondiste.",
+            "sq": "Kjo tabelë tregon kuizet në stories që ke plotësuar."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_instagram_activity/story_interactions/quizzes.json")
+
+
+def emoji_sliders_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a Story emoji slider the participant used.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a Story emoji slider the participant used.",
+          "source_file": "your_instagram_activity/story_interactions/emoji_sliders.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_emoji_sliders",
+          "title": {
+            "en": "Story emoji sliders",
+            "nl": "Story-emojischuifregelaars",
+            "de": "Story-Emoji-Slider",
+            "pl": "Suwaki emoji w relacjach",
+            "tr": "Hikaye emoji kaydırıcıları",
+            "ar": "أشرطة تمرير الرموز في القصص",
+            "ru": "Эмодзи-слайдеры в историях",
+            "it": "Slider emoji nelle storie",
+            "ro": "Glisoare emoji în povești",
+            "es": "Deslizadores de emoji en historias",
+            "sq": "Rrëshqitësit me emoji në stories"
+          },
+          "description": {
+            "en": "This table shows the story emoji sliders you used.",
+            "nl": "Deze tabel toont de emojischuifregelaars in stories die je hebt gebruikt.",
+            "de": "Diese Tabelle zeigt die Emoji-Slider in Storys, die Sie benutzt haben.",
+            "pl": "Ta tabela pokazuje suwaki emoji w relacjach, których użyłeś/aś.",
+            "tr": "Bu tablo, kullandığın hikaye emoji kaydırıcılarını gösterir.",
+            "ar": "يعرض هذا الجدول أشرطة تمرير الرموز التعبيرية في القصص التي استخدمتها.",
+            "ru": "В этой таблице показаны эмодзи-слайдеры в историях, которые вы использовали.",
+            "it": "Questa tabella mostra gli slider emoji nelle storie che hai usato.",
+            "ro": "Acest tabel arată glisoarele emoji din povești pe care le-ai folosit.",
+            "es": "Esta tabla muestra los deslizadores de emoji en historias que usaste.",
+            "sq": "Kjo tabelë tregon rrëshqitësit me emoji në stories që ke përdorur."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_instagram_activity/story_interactions/emoji_sliders.json")
+
+
+def questions_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a Story question the participant answered.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a Story question the participant answered.",
+          "source_file": "your_instagram_activity/story_interactions/questions.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_questions",
+          "title": {
+            "en": "Story questions",
+            "nl": "Story-vragen",
+            "de": "Story-Fragen",
+            "pl": "Pytania w relacjach",
+            "tr": "Hikaye soruları",
+            "ar": "أسئلة القصص",
+            "ru": "Вопросы в историях",
+            "it": "Domande nelle storie",
+            "ro": "Întrebări în povești",
+            "es": "Preguntas en historias",
+            "sq": "Pyetjet në stories"
+          },
+          "description": {
+            "en": "This table shows the story questions you answered.",
+            "nl": "Deze tabel toont de story-vragen die je hebt beantwoord.",
+            "de": "Diese Tabelle zeigt die Story-Fragen, die Sie beantwortet haben.",
+            "pl": "Ta tabela pokazuje pytania w relacjach, na które odpowiedziałeś/aś.",
+            "tr": "Bu tablo, yanıtladığın hikaye sorularını gösterir.",
+            "ar": "يعرض هذا الجدول أسئلة القصص التي أجبت عنها.",
+            "ru": "В этой таблице показаны вопросы в историях, на которые вы ответили.",
+            "it": "Questa tabella mostra le domande nelle storie a cui hai risposto.",
+            "ro": "Acest tabel arată întrebările din povești la care ai răspuns.",
+            "es": "Esta tabla muestra las preguntas de historias que respondiste.",
+            "sq": "Kjo tabelë tregon pyetjet në stories që ke përgjigjur."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_instagram_activity/story_interactions/questions.json")
+
+
+def countdowns_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a Story countdown the participant interacted with.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a Story countdown the participant interacted with.",
+          "source_file": "your_instagram_activity/story_interactions/countdowns.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_countdowns",
+          "title": {
+            "en": "Story countdowns",
+            "nl": "Story-afteltimers",
+            "de": "Story-Countdowns",
+            "pl": "Odliczania w relacjach",
+            "tr": "Hikaye geri sayımları",
+            "ar": "العد التنازلي في القصص",
+            "ru": "Обратные отсчёты в историях",
+            "it": "Conti alla rovescia nelle storie",
+            "ro": "Numărători inverse în povești",
+            "es": "Cuentas regresivas en historias",
+            "sq": "Numërimet mbrapsht në stories"
+          },
+          "description": {
+            "en": "This table shows the story countdowns you interacted with.",
+            "nl": "Deze tabel toont de story-afteltimers waarmee je interactie had.",
+            "de": "Diese Tabelle zeigt die Story-Countdowns, mit denen Sie interagiert haben.",
+            "pl": "Ta tabela pokazuje odliczania w relacjach, z którymi wchodziłeś/aś w interakcję.",
+            "tr": "Bu tablo, etkileşimde bulunduğun hikaye geri sayımlarını gösterir.",
+            "ar": "يعرض هذا الجدول العد التنازلي في القصص الذي تفاعلت معه.",
+            "ru": "В этой таблице показаны обратные отсчёты в историях, с которыми вы взаимодействовали.",
+            "it": "Questa tabella mostra i conti alla rovescia nelle storie con cui hai interagito.",
+            "ro": "Acest tabel arată numărătorile inverse din povești cu care ai interacționat.",
+            "es": "Esta tabla muestra las cuentas regresivas de historias con las que interactuaste.",
+            "sq": "Kjo tabelë tregon numërimet mbrapsht në stories me të cilat ke ndërvepruar."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "your_instagram_activity/story_interactions/countdowns.json")
+
+
+def link_history_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a link the participant opened from within Instagram.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a link the participant opened from within Instagram.",
+          "source_file": "logged_information/link_history/link_history.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_link_history",
+          "title": {
+            "en": "Links you opened through Instagram",
+            "nl": "Links die je via Instagram hebt geopend",
+            "de": "Über Instagram geöffnete Links",
+            "pl": "Linki otwarte przez Instagram",
+            "tr": "Instagram üzerinden açtığın bağlantılar",
+            "ar": "الروابط التي فتحتها عبر إنستغرام",
+            "ru": "Ссылки, открытые через Instagram",
+            "it": "Link aperti tramite Instagram",
+            "ro": "Linkuri deschise prin Instagram",
+            "es": "Enlaces que abriste a través de Instagram",
+            "sq": "Lidhjet që ke hapur përmes Instagram"
+          },
+          "description": {
+            "en": "This table shows the links you opened from within Instagram and when.",
+            "nl": "Deze tabel toont de links die je vanuit Instagram hebt geopend en wanneer.",
+            "de": "Diese Tabelle zeigt die Links, die Sie über Instagram geöffnet haben, und wann.",
+            "pl": "Ta tabela pokazuje linki otwarte z poziomu Instagrama oraz kiedy.",
+            "tr": "Bu tablo, Instagram içinden açtığın bağlantıları ve ne zaman açtığını gösterir.",
+            "ar": "يعرض هذا الجدول الروابط التي فتحتها من داخل إنستغرام ومتى.",
+            "ru": "В этой таблице показаны ссылки, которые вы открывали в Instagram, и когда.",
+            "it": "Questa tabella mostra i link che hai aperto da Instagram e quando.",
+            "ro": "Acest tabel arată linkurile deschise din Instagram și când.",
+            "es": "Esta tabla muestra los enlaces que abriste desde Instagram y cuándo.",
+            "sq": "Kjo tabelë tregon lidhjet që ke hapur nga Instagram dhe kur."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "logged_information/link_history/link_history.json")
+
+
+def follow_requests_youve_received_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a follow request the participant received.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a follow request the participant received.",
+          "source_file": "connections/followers_and_following/follow_requests_you've_received.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_follow_requests_youve_received",
+          "title": {
+            "en": "Follow requests you received",
+            "nl": "Ontvangen volgverzoeken",
+            "de": "Erhaltene Follow-Anfragen",
+            "pl": "Otrzymane prośby o obserwowanie",
+            "tr": "Aldığın takip istekleri",
+            "ar": "طلبات المتابعة التي تلقيتها",
+            "ru": "Полученные запросы на подписку",
+            "it": "Richieste di follow ricevute",
+            "ro": "Cereri de urmărire primite",
+            "es": "Solicitudes de seguimiento recibidas",
+            "sq": "Kërkesat për ndjekje që ke marrë"
+          },
+          "description": {
+            "en": "This table shows the follow requests you received on Instagram.",
+            "nl": "Deze tabel toont de volgverzoeken die je op Instagram hebt ontvangen.",
+            "de": "Diese Tabelle zeigt die Follow-Anfragen, die Sie auf Instagram erhalten haben.",
+            "pl": "Ta tabela pokazuje prośby o obserwowanie otrzymane na Instagramie.",
+            "tr": "Bu tablo, Instagram'da aldığın takip isteklerini gösterir.",
+            "ar": "يعرض هذا الجدول طلبات المتابعة التي تلقيتها على إنستغرام.",
+            "ru": "В этой таблице показаны запросы на подписку, полученные вами в Instagram.",
+            "it": "Questa tabella mostra le richieste di follow ricevute su Instagram.",
+            "ro": "Acest tabel arată cererile de urmărire primite pe Instagram.",
+            "es": "Esta tabla muestra las solicitudes de seguimiento que recibiste en Instagram.",
+            "sq": "Kjo tabelë tregon kërkesat për ndjekje që ke marrë në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "connections/followers_and_following/follow_requests_you've_received.json")
+
+
+def pending_follow_requests_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a follow request of the participant that is still pending.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a follow request of the participant that is still pending.",
+          "source_file": "connections/followers_and_following/pending_follow_requests.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_pending_follow_requests",
+          "title": {
+            "en": "Pending follow requests",
+            "nl": "Openstaande volgverzoeken",
+            "de": "Ausstehende Follow-Anfragen",
+            "pl": "Oczekujące prośby o obserwowanie",
+            "tr": "Bekleyen takip istekleri",
+            "ar": "طلبات المتابعة المعلقة",
+            "ru": "Ожидающие запросы на подписку",
+            "it": "Richieste di follow in sospeso",
+            "ro": "Cereri de urmărire în așteptare",
+            "es": "Solicitudes de seguimiento pendientes",
+            "sq": "Kërkesat për ndjekje në pritje"
+          },
+          "description": {
+            "en": "This table shows your follow requests on Instagram that are still pending.",
+            "nl": "Deze tabel toont je volgverzoeken op Instagram die nog openstaan.",
+            "de": "Diese Tabelle zeigt Ihre Follow-Anfragen auf Instagram, die noch ausstehen.",
+            "pl": "Ta tabela pokazuje Twoje prośby o obserwowanie na Instagramie, które wciąż oczekują.",
+            "tr": "Bu tablo, Instagram'da hâlâ bekleyen takip isteklerini gösterir.",
+            "ar": "يعرض هذا الجدول طلبات المتابعة الخاصة بك على إنستغرام التي ما زالت معلقة.",
+            "ru": "В этой таблице показаны ваши запросы на подписку в Instagram, которые ещё ожидают ответа.",
+            "it": "Questa tabella mostra le tue richieste di follow su Instagram ancora in sospeso.",
+            "ro": "Acest tabel arată cererile tale de urmărire pe Instagram aflate încă în așteptare.",
+            "es": "Esta tabla muestra tus solicitudes de seguimiento en Instagram que siguen pendientes.",
+            "sq": "Kjo tabelë tregon kërkesat e tua për ndjekje në Instagram që janë ende në pritje."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "connections/followers_and_following/pending_follow_requests.json")
+
+
+def recent_follow_requests_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a recent follow request of the participant.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a recent follow request of the participant.",
+          "source_file": "connections/followers_and_following/recent_follow_requests.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_recent_follow_requests",
+          "title": {
+            "en": "Recent follow requests",
+            "nl": "Recente volgverzoeken",
+            "de": "Kürzliche Follow-Anfragen",
+            "pl": "Ostatnie prośby o obserwowanie",
+            "tr": "Son takip istekleri",
+            "ar": "طلبات المتابعة الأخيرة",
+            "ru": "Недавние запросы на подписку",
+            "it": "Richieste di follow recenti",
+            "ro": "Cereri de urmărire recente",
+            "es": "Solicitudes de seguimiento recientes",
+            "sq": "Kërkesat e fundit për ndjekje"
+          },
+          "description": {
+            "en": "This table shows your recent follow requests on Instagram.",
+            "nl": "Deze tabel toont je recente volgverzoeken op Instagram.",
+            "de": "Diese Tabelle zeigt Ihre kürzlichen Follow-Anfragen auf Instagram.",
+            "pl": "Ta tabela pokazuje Twoje ostatnie prośby o obserwowanie na Instagramie.",
+            "tr": "Bu tablo, Instagram'daki son takip isteklerini gösterir.",
+            "ar": "يعرض هذا الجدول طلبات المتابعة الأخيرة الخاصة بك على إنستغرام.",
+            "ru": "В этой таблице показаны ваши недавние запросы на подписку в Instagram.",
+            "it": "Questa tabella mostra le tue richieste di follow recenti su Instagram.",
+            "ro": "Acest tabel arată cererile tale recente de urmărire pe Instagram.",
+            "es": "Esta tabla muestra tus solicitudes de seguimiento recientes en Instagram.",
+            "sq": "Kjo tabelë tregon kërkesat e tua të fundit për ndjekje në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "connections/followers_and_following/recent_follow_requests.json")
+
+
+def recently_unfollowed_profiles_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a profile the participant recently unfollowed.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a profile the participant recently unfollowed.",
+          "source_file": "connections/followers_and_following/recently_unfollowed_profiles.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_recently_unfollowed_profiles",
+          "title": {
+            "en": "Recently unfollowed profiles",
+            "nl": "Recent ontvolgde profielen",
+            "de": "Kürzlich entfolgte Profile",
+            "pl": "Ostatnio przestane obserwować profile",
+            "tr": "Yakın zamanda takibi bırakılan profiller",
+            "ar": "الملفات التي ألغيت متابعتها مؤخرًا",
+            "ru": "Недавние отписки",
+            "it": "Profili che hai smesso di seguire di recente",
+            "ro": "Profiluri neurmărite recent",
+            "es": "Perfiles que dejaste de seguir recientemente",
+            "sq": "Profilet që ke ndaluar së ndjekuri së fundmi"
+          },
+          "description": {
+            "en": "This table shows the profiles you recently unfollowed on Instagram.",
+            "nl": "Deze tabel toont de profielen die je recent op Instagram hebt ontvolgd.",
+            "de": "Diese Tabelle zeigt die Profile, denen Sie auf Instagram kürzlich nicht mehr folgen.",
+            "pl": "Ta tabela pokazuje profile, których ostatnio przestałeś/aś obserwować na Instagramie.",
+            "tr": "Bu tablo, Instagram'da yakın zamanda takibi bıraktığın profilleri gösterir.",
+            "ar": "يعرض هذا الجدول الملفات التي ألغيت متابعتها مؤخرًا على إنستغرام.",
+            "ru": "В этой таблице показаны профили, от которых вы недавно отписались в Instagram.",
+            "it": "Questa tabella mostra i profili che hai smesso di seguire di recente su Instagram.",
+            "ro": "Acest tabel arată profilurile pe care nu le mai urmărești recent pe Instagram.",
+            "es": "Esta tabla muestra los perfiles que dejaste de seguir recientemente en Instagram.",
+            "sq": "Kjo tabelë tregon profilet që ke ndaluar së ndjekuri së fundmi në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "connections/followers_and_following/recently_unfollowed_profiles.json")
+
+
+def close_friends_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a profile on the participant's close friends list.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a profile on the participant's close friends list.",
+          "source_file": "connections/followers_and_following/close_friends.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_close_friends",
+          "title": {
+            "en": "Close friends",
+            "nl": "Goede vrienden",
+            "de": "Enge Freund*innen",
+            "pl": "Bliscy znajomi",
+            "tr": "Yakın arkadaşlar",
+            "ar": "الأصدقاء المقربون",
+            "ru": "Близкие друзья",
+            "it": "Amici più stretti",
+            "ro": "Prieteni apropiați",
+            "es": "Mejores amigos",
+            "sq": "Miqtë e ngushtë"
+          },
+          "description": {
+            "en": "This table shows the profiles on your close friends list on Instagram.",
+            "nl": "Deze tabel toont de profielen op je lijst met goede vrienden op Instagram.",
+            "de": "Diese Tabelle zeigt die Profile auf Ihrer Liste enger Freund*innen auf Instagram.",
+            "pl": "Ta tabela pokazuje profile na Twojej liście bliskich znajomych na Instagramie.",
+            "tr": "Bu tablo, Instagram'daki yakın arkadaşlar listendeki profilleri gösterir.",
+            "ar": "يعرض هذا الجدول الملفات الموجودة في قائمة الأصدقاء المقربين على إنستغرام.",
+            "ru": "В этой таблице показаны профили из вашего списка близких друзей в Instagram.",
+            "it": "Questa tabella mostra i profili nel tuo elenco di amici più stretti su Instagram.",
+            "ro": "Acest tabel arată profilurile din lista ta de prieteni apropiați pe Instagram.",
+            "es": "Esta tabla muestra los perfiles de tu lista de mejores amigos en Instagram.",
+            "sq": "Kjo tabelë tregon profilet në listën e miqve të ngushtë në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "connections/followers_and_following/close_friends.json")
+
+
+def blocked_profiles_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a profile the participant blocked.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a profile the participant blocked.",
+          "source_file": "connections/followers_and_following/blocked_profiles.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_blocked_profiles",
+          "title": {
+            "en": "Blocked profiles",
+            "nl": "Geblokkeerde profielen",
+            "de": "Blockierte Profile",
+            "pl": "Zablokowane profile",
+            "tr": "Engellenen profiller",
+            "ar": "الملفات المحظورة",
+            "ru": "Заблокированные профили",
+            "it": "Profili bloccati",
+            "ro": "Profiluri blocate",
+            "es": "Perfiles bloqueados",
+            "sq": "Profilet e bllokuara"
+          },
+          "description": {
+            "en": "This table shows the profiles you blocked on Instagram.",
+            "nl": "Deze tabel toont de profielen die je op Instagram hebt geblokkeerd.",
+            "de": "Diese Tabelle zeigt die Profile, die Sie auf Instagram blockiert haben.",
+            "pl": "Ta tabela pokazuje profile zablokowane przez Ciebie na Instagramie.",
+            "tr": "Bu tablo, Instagram'da engellediğin profilleri gösterir.",
+            "ar": "يعرض هذا الجدول الملفات التي حظرتها على إنستغرام.",
+            "ru": "В этой таблице показаны профили, которые вы заблокировали в Instagram.",
+            "it": "Questa tabella mostra i profili che hai bloccato su Instagram.",
+            "ro": "Acest tabel arată profilurile pe care le-ai blocat pe Instagram.",
+            "es": "Esta tabla muestra los perfiles que bloqueaste en Instagram.",
+            "sq": "Kjo tabelë tregon profilet që ke bllokuar në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "connections/followers_and_following/blocked_profiles.json")
+
+
+def restricted_profiles_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a profile the participant restricted.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a profile the participant restricted.",
+          "source_file": "connections/followers_and_following/restricted_profiles.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_restricted_profiles",
+          "title": {
+            "en": "Restricted profiles",
+            "nl": "Beperkte profielen",
+            "de": "Eingeschränkte Profile",
+            "pl": "Ograniczone profile",
+            "tr": "Kısıtlanan profiller",
+            "ar": "الملفات المقيدة",
+            "ru": "Ограниченные профили",
+            "it": "Profili con restrizioni",
+            "ro": "Profiluri restricționate",
+            "es": "Perfiles restringidos",
+            "sq": "Profilet e kufizuara"
+          },
+          "description": {
+            "en": "This table shows the profiles you restricted on Instagram.",
+            "nl": "Deze tabel toont de profielen die je op Instagram hebt beperkt.",
+            "de": "Diese Tabelle zeigt die Profile, die Sie auf Instagram eingeschränkt haben.",
+            "pl": "Ta tabela pokazuje profile ograniczone przez Ciebie na Instagramie.",
+            "tr": "Bu tablo, Instagram'da kısıtladığın profilleri gösterir.",
+            "ar": "يعرض هذا الجدول الملفات التي قيدتها على إنستغرام.",
+            "ru": "В этой таблице показаны профили, которые вы ограничили в Instagram.",
+            "it": "Questa tabella mostra i profili a cui hai applicato restrizioni su Instagram.",
+            "ro": "Acest tabel arată profilurile pe care le-ai restricționat pe Instagram.",
+            "es": "Esta tabla muestra los perfiles que restringiste en Instagram.",
+            "sq": "Kjo tabelë tregon profilet që ke kufizuar në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "connections/followers_and_following/restricted_profiles.json")
+
+
+def ads_clicked_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an ad the participant clicked on Instagram.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an ad the participant clicked on Instagram.",
+          "source_file": "ads_information/ads_and_topics/ads_clicked.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_ads_clicked",
+          "title": {
+            "en": "Ads you clicked",
+            "nl": "Advertenties waarop je hebt geklikt",
+            "de": "Angeklickte Werbung",
+            "pl": "Kliknięte reklamy",
+            "tr": "Tıkladığın reklamlar",
+            "ar": "الإعلانات التي نقرت عليها",
+            "ru": "Реклама, по которой вы кликнули",
+            "it": "Inserzioni su cui hai cliccato",
+            "ro": "Reclame pe care ai dat clic",
+            "es": "Anuncios en los que hiciste clic",
+            "sq": "Reklamat që ke klikuar"
+          },
+          "description": {
+            "en": "This table shows the ads you clicked on Instagram.",
+            "nl": "Deze tabel toont de advertenties waarop je op Instagram hebt geklikt.",
+            "de": "Diese Tabelle zeigt die Werbeanzeigen, die Sie auf Instagram angeklickt haben.",
+            "pl": "Ta tabela pokazuje reklamy kliknięte przez Ciebie na Instagramie.",
+            "tr": "Bu tablo, Instagram'da tıkladığın reklamları gösterir.",
+            "ar": "يعرض هذا الجدول الإعلانات التي نقرت عليها في إنستغرام.",
+            "ru": "В этой таблице показана реклама, по которой вы кликнули в Instagram.",
+            "it": "Questa tabella mostra le inserzioni su cui hai cliccato su Instagram.",
+            "ro": "Acest tabel arată reclamele pe care ai dat clic pe Instagram.",
+            "es": "Esta tabla muestra los anuncios en los que hiciste clic en Instagram.",
+            "sq": "Kjo tabelë tregon reklamat që ke klikuar në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "ads_information/ads_and_topics/ads_clicked.json")
+
+
+def suggested_profiles_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a suggested profile the participant viewed.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a suggested profile the participant viewed.",
+          "source_file": "ads_information/ads_and_topics/suggested_profiles_viewed.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_suggested_profiles_viewed",
+          "title": {
+            "en": "Suggested profiles you viewed",
+            "nl": "Bekeken voorgestelde profielen",
+            "de": "Angesehene vorgeschlagene Profile",
+            "pl": "Wyświetlone proponowane profile",
+            "tr": "Görüntülediğin önerilen profiller",
+            "ar": "الملفات المقترحة التي شاهدتها",
+            "ru": "Просмотренные рекомендованные профили",
+            "it": "Profili suggeriti visualizzati",
+            "ro": "Profiluri sugerate vizualizate",
+            "es": "Perfiles sugeridos que viste",
+            "sq": "Profilet e sugjeruara që ke parë"
+          },
+          "description": {
+            "en": "This table shows the suggested profiles you viewed on Instagram.",
+            "nl": "Deze tabel toont de voorgestelde profielen die je op Instagram hebt bekeken.",
+            "de": "Diese Tabelle zeigt die vorgeschlagenen Profile, die Sie auf Instagram angesehen haben.",
+            "pl": "Ta tabela pokazuje proponowane profile wyświetlone przez Ciebie na Instagramie.",
+            "tr": "Bu tablo, Instagram'da görüntülediğin önerilen profilleri gösterir.",
+            "ar": "يعرض هذا الجدول الملفات المقترحة التي شاهدتها على إنستغرام.",
+            "ru": "В этой таблице показаны рекомендованные профили, которые вы просматривали в Instagram.",
+            "it": "Questa tabella mostra i profili suggeriti che hai visualizzato su Instagram.",
+            "ro": "Acest tabel arată profilurile sugerate pe care le-ai vizualizat pe Instagram.",
+            "es": "Esta tabla muestra los perfiles sugeridos que viste en Instagram.",
+            "sq": "Kjo tabelë tregon profilet e sugjeruara që ke parë në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "ads_information/ads_and_topics/suggested_profiles_viewed.json")
+
+
+def profiles_youre_not_interested_in_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a profile the participant marked as not interesting.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a profile the participant marked as not interesting.",
+          "source_file": "ads_information/ads_and_topics/profiles_you're_not_interested_in.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_profiles_youre_not_interested_in",
+          "title": {
+            "en": "Profiles you're not interested in",
+            "nl": "Profielen waarin je niet geïnteresseerd bent",
+            "de": "Profile ohne Interesse",
+            "pl": "Profile, które Cię nie interesują",
+            "tr": "İlgilenmediğin profiller",
+            "ar": "الملفات التي لا تهمك",
+            "ru": "Неинтересные вам профили",
+            "it": "Profili che non ti interessano",
+            "ro": "Profiluri care nu te interesează",
+            "es": "Perfiles que no te interesan",
+            "sq": "Profilet që nuk të interesojnë"
+          },
+          "description": {
+            "en": "This table shows the profiles you marked as not interesting on Instagram.",
+            "nl": "Deze tabel toont de profielen die je op Instagram als niet interessant hebt gemarkeerd.",
+            "de": "Diese Tabelle zeigt die Profile, die Sie auf Instagram als uninteressant markiert haben.",
+            "pl": "Ta tabela pokazuje profile oznaczone przez Ciebie na Instagramie jako nieinteresujące.",
+            "tr": "Bu tablo, Instagram'da ilgilenmiyorum olarak işaretlediğin profilleri gösterir.",
+            "ar": "يعرض هذا الجدول الملفات التي وضعت عليها علامة غير مهمة في إنستغرام.",
+            "ru": "В этой таблице показаны профили, которые вы отметили в Instagram как неинтересные.",
+            "it": "Questa tabella mostra i profili che hai segnato come non interessanti su Instagram.",
+            "ro": "Acest tabel arată profilurile pe care le-ai marcat ca neinteresante pe Instagram.",
+            "es": "Esta tabla muestra los perfiles que marcaste como no interesantes en Instagram.",
+            "sq": "Kjo tabelë tregon profilet që ke shënuar si jo interesante në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "ads_information/ads_and_topics/profiles_you're_not_interested_in.json")
+
+
+def posts_youre_not_interested_in_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a post the participant marked as not interesting.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a post the participant marked as not interesting.",
+          "source_file": "ads_information/ads_and_topics/posts_you're_not_interested_in.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_posts_youre_not_interested_in",
+          "title": {
+            "en": "Posts you're not interested in",
+            "nl": "Berichten waarin je niet geïnteresseerd bent",
+            "de": "Beiträge ohne Interesse",
+            "pl": "Posty, które Cię nie interesują",
+            "tr": "İlgilenmediğin gönderiler",
+            "ar": "المنشورات التي لا تهمك",
+            "ru": "Неинтересные вам публикации",
+            "it": "Post che non ti interessano",
+            "ro": "Postări care nu te interesează",
+            "es": "Publicaciones que no te interesan",
+            "sq": "Postimet që nuk të interesojnë"
+          },
+          "description": {
+            "en": "This table shows the posts you marked as not interesting on Instagram.",
+            "nl": "Deze tabel toont de berichten die je op Instagram als niet interessant hebt gemarkeerd.",
+            "de": "Diese Tabelle zeigt die Beiträge, die Sie auf Instagram als uninteressant markiert haben.",
+            "pl": "Ta tabela pokazuje posty oznaczone przez Ciebie na Instagramie jako nieinteresujące.",
+            "tr": "Bu tablo, Instagram'da ilgilenmiyorum olarak işaretlediğin gönderileri gösterir.",
+            "ar": "يعرض هذا الجدول المنشورات التي وضعت عليها علامة غير مهمة في إنستغرام.",
+            "ru": "В этой таблице показаны публикации, которые вы отметили в Instagram как неинтересные.",
+            "it": "Questa tabella mostra i post che hai segnato come non interessanti su Instagram.",
+            "ro": "Acest tabel arată postările pe care le-ai marcat ca neinteresante pe Instagram.",
+            "es": "Esta tabla muestra las publicaciones que marcaste como no interesantes en Instagram.",
+            "sq": "Kjo tabelë tregon postimet që ke shënuar si jo interesante në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "ads_information/ads_and_topics/posts_you're_not_interested_in.json")
+
+
+def accounts_youre_not_interested_in_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an account the participant marked as not interesting.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an account the participant marked as not interesting.",
+          "source_file": "ads_information/ads_and_topics/accounts_you're_not_interested_in.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_accounts_youre_not_interested_in",
+          "title": {
+            "en": "Accounts you're not interested in",
+            "nl": "Accounts waarin je niet geïnteresseerd bent",
+            "de": "Konten ohne Interesse",
+            "pl": "Konta, które Cię nie interesują",
+            "tr": "İlgilenmediğin hesaplar",
+            "ar": "الحسابات التي لا تهمك",
+            "ru": "Неинтересные вам аккаунты",
+            "it": "Account che non ti interessano",
+            "ro": "Conturi care nu te interesează",
+            "es": "Cuentas que no te interesan",
+            "sq": "Llogaritë që nuk të interesojnë"
+          },
+          "description": {
+            "en": "This table shows the accounts you marked as not interesting on Instagram.",
+            "nl": "Deze tabel toont de accounts die je op Instagram als niet interessant hebt gemarkeerd.",
+            "de": "Diese Tabelle zeigt die Konten, die Sie auf Instagram als uninteressant markiert haben.",
+            "pl": "Ta tabela pokazuje konta oznaczone przez Ciebie na Instagramie jako nieinteresujące.",
+            "tr": "Bu tablo, Instagram'da ilgilenmiyorum olarak işaretlediğin hesapları gösterir.",
+            "ar": "يعرض هذا الجدول الحسابات التي وضعت عليها علامة غير مهمة في إنستغرام.",
+            "ru": "В этой таблице показаны аккаунты, которые вы отметили в Instagram как неинтересные.",
+            "it": "Questa tabella mostra gli account che hai segnato come non interessanti su Instagram.",
+            "ro": "Acest tabel arată conturile pe care le-ai marcat ca neinteresante pe Instagram.",
+            "es": "Esta tabla muestra las cuentas que marcaste como no interesantes en Instagram.",
+            "sq": "Kjo tabelë tregon llogaritë që ke shënuar si jo interesante në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "ads_information/ads_and_topics/accounts_you're_not_interested_in.json")
+
+
+def advertisers_using_your_activity_or_information_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is an advertiser that used the participant's activity or information.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is an advertiser that used the participant's activity or information.",
+          "source_file": "ads_information/instagram_ads_and_businesses/advertisers_using_your_activity_or_information.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_advertisers_using_your_activity_or_information",
+          "title": {
+            "en": "Advertisers using your information",
+            "nl": "Adverteerders die je informatie gebruiken",
+            "de": "Werbetreibende, die Ihre Informationen verwenden",
+            "pl": "Reklamodawcy korzystający z Twoich informacji",
+            "tr": "Bilgilerini kullanan reklamverenler",
+            "ar": "المعلنون الذين يستخدمون معلوماتك",
+            "ru": "Рекламодатели, использующие вашу информацию",
+            "it": "Inserzionisti che utilizzano le tue informazioni",
+            "ro": "Agenți de publicitate care utilizează informațiile tale",
+            "es": "Anunciantes que utilizan tu información",
+            "sq": "Reklamuesit që përdorin informacionin tënd"
+          },
+          "description": {
+            "en": "This table shows advertisers that Meta reports as having used your activity or information.",
+            "nl": "Deze tabel toont adverteerders die volgens Meta je activiteit of informatie hebben gebruikt.",
+            "de": "Diese Tabelle zeigt Werbetreibende, die laut Meta Ihre Aktivitäten oder Informationen verwendet haben.",
+            "pl": "Ta tabela pokazuje reklamodawców, którzy według Meta korzystali z Twojej aktywności lub informacji.",
+            "tr": "Bu tablo, Meta'ya göre etkinliklerini veya bilgilerini kullanan reklamverenleri gösterir.",
+            "ar": "يعرض هذا الجدول المعلنين الذين تفيد Meta بأنهم استخدموا نشاطك أو معلوماتك.",
+            "ru": "В этой таблице показаны рекламодатели, которые, по данным Meta, использовали ваши действия или информацию.",
+            "it": "Questa tabella mostra gli inserzionisti che, secondo Meta, hanno utilizzato la tua attività o le tue informazioni.",
+            "ro": "Acest tabel arată agenții de publicitate care, potrivit Meta, au utilizat activitatea sau informațiile tale.",
+            "es": "Esta tabla muestra los anunciantes que, según Meta, han utilizado tu actividad o información.",
+            "sq": "Kjo tabelë tregon reklamuesit që, sipas Meta, kanë përdorur aktivitetin ose informacionin tënd."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "ads_information/instagram_ads_and_businesses/advertisers_using_your_activity_or_information.json")
+
+
+def your_topics_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a topic Instagram associates with the participant.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a topic Instagram associates with the participant.",
+          "source_file": "preferences/your_topics/your_topics.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_your_topics",
+          "title": {
+            "en": "Your topics",
+            "nl": "Je onderwerpen",
+            "de": "Ihre Themen",
+            "pl": "Twoje tematy",
+            "tr": "Konuların",
+            "ar": "مواضيعك",
+            "ru": "Ваши темы",
+            "it": "I tuoi argomenti",
+            "ro": "Subiectele tale",
+            "es": "Tus temas",
+            "sq": "Temat e tua"
+          },
+          "description": {
+            "en": "This table shows the topics Instagram associates with you.",
+            "nl": "Deze tabel toont de onderwerpen die Instagram met je associeert.",
+            "de": "Diese Tabelle zeigt die Themen, die Instagram mit Ihnen verbindet.",
+            "pl": "Ta tabela pokazuje tematy, które Instagram z Tobą łączy.",
+            "tr": "Bu tablo, Instagram'ın seninle ilişkilendirdiği konuları gösterir.",
+            "ar": "يعرض هذا الجدول المواضيع التي يربطها إنستغرام بك.",
+            "ru": "В этой таблице показаны темы, которые Instagram связывает с вами.",
+            "it": "Questa tabella mostra gli argomenti che Instagram associa a te.",
+            "ro": "Acest tabel arată subiectele pe care Instagram le asociază cu tine.",
+            "es": "Esta tabla muestra los temas que Instagram asocia contigo.",
+            "sq": "Kjo tabelë tregon temat që Instagram lidh me ty."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "preferences/your_topics/your_topics.json")
+
+
+def recommended_topics_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a topic Instagram recommends to the participant.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a topic Instagram recommends to the participant.",
+          "source_file": "preferences/your_topics/recommended_topics.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_recommended_topics",
+          "title": {
+            "en": "Recommended topics",
+            "nl": "Aanbevolen onderwerpen",
+            "de": "Empfohlene Themen",
+            "pl": "Polecane tematy",
+            "tr": "Önerilen konular",
+            "ar": "المواضيع المقترحة",
+            "ru": "Рекомендуемые темы",
+            "it": "Argomenti consigliati",
+            "ro": "Subiecte recomandate",
+            "es": "Temas recomendados",
+            "sq": "Temat e rekomanduara"
+          },
+          "description": {
+            "en": "This table shows the topics Instagram recommends to you.",
+            "nl": "Deze tabel toont de onderwerpen die Instagram je aanbeveelt.",
+            "de": "Diese Tabelle zeigt die Themen, die Instagram Ihnen empfiehlt.",
+            "pl": "Ta tabela pokazuje tematy polecane Ci przez Instagram.",
+            "tr": "Bu tablo, Instagram'ın sana önerdiği konuları gösterir.",
+            "ar": "يعرض هذا الجدول المواضيع التي يقترحها عليك إنستغرام.",
+            "ru": "В этой таблице показаны темы, которые вам рекомендует Instagram.",
+            "it": "Questa tabella mostra gli argomenti che Instagram ti consiglia.",
+            "ro": "Acest tabel arată subiectele pe care Instagram ți le recomandă.",
+            "es": "Esta tabla muestra los temas que Instagram te recomienda.",
+            "sq": "Kjo tabelë tregon temat që Instagram të rekomandon."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "preferences/your_topics/recommended_topics.json")
+
+
+def off_meta_activity_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """Each row is a website or app that shared the participant's activity with Meta, with the recorded events.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "Each row is a website or app that shared the participant's activity with Meta, with the recorded events.",
+          "source_file": "apps_and_websites_off_of_instagram/apps_and_websites/your_activity_off_meta_technologies.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_off_meta_activity",
+          "title": {
+            "en": "Activity off Meta technologies",
+            "nl": "Activiteit buiten Meta-technologieën",
+            "de": "Aktivitäten außerhalb von Meta-Technologien",
+            "pl": "Aktywność poza technologiami Meta",
+            "tr": "Meta teknolojileri dışındaki etkinlikler",
+            "ar": "النشاط خارج تقنيات Meta",
+            "ru": "Активность вне технологий Meta",
+            "it": "Attività al di fuori delle tecnologie Meta",
+            "ro": "Activitate în afara tehnologiilor Meta",
+            "es": "Actividad fuera de las tecnologías de Meta",
+            "sq": "Aktiviteti jashtë teknologjive të Meta"
+          },
+          "description": {
+            "en": "This table shows which websites and apps shared your activity with Meta.",
+            "nl": "Deze tabel toont welke websites en apps je activiteit met Meta hebben gedeeld.",
+            "de": "Diese Tabelle zeigt, welche Websites und Apps Ihre Aktivitäten mit Meta geteilt haben.",
+            "pl": "Ta tabela pokazuje, które witryny i aplikacje udostępniły Twoją aktywność Meta.",
+            "tr": "Bu tablo, hangi web sitelerinin ve uygulamaların etkinliğini Meta ile paylaştığını gösterir.",
+            "ar": "يعرض هذا الجدول المواقع والتطبيقات التي شاركت نشاطك مع Meta.",
+            "ru": "В этой таблице показано, какие сайты и приложения передавали вашу активность Meta.",
+            "it": "Questa tabella mostra quali siti web e app hanno condiviso la tua attività con Meta.",
+            "ro": "Acest tabel arată ce site-uri și aplicații au partajat activitatea ta cu Meta.",
+            "es": "Esta tabla muestra qué sitios web y aplicaciones compartieron tu actividad con Meta.",
+            "sq": "Kjo tabelë tregon cilat faqe dhe aplikacione kanë ndarë aktivitetin tënd me Meta."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "apps_and_websites_off_of_instagram/apps_and_websites/your_activity_off_meta_technologies.json")
+
+
+def comments_allowed_from_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """The participant's setting for who may comment on their posts.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "The participant's setting for who may comment on their posts.",
+          "source_file": "preferences/settings/comments_allowed_from.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_comments_allowed_from",
+          "title": {
+            "en": "Who can comment",
+            "nl": "Wie mag reageren",
+            "de": "Wer kommentieren darf",
+            "pl": "Kto może komentować",
+            "tr": "Kimler yorum yapabilir",
+            "ar": "من يمكنه التعليق",
+            "ru": "Кто может комментировать",
+            "it": "Chi può commentare",
+            "ro": "Cine poate comenta",
+            "es": "Quién puede comentar",
+            "sq": "Kush mund të komentojë"
+          },
+          "description": {
+            "en": "This table shows your setting for who may comment on your Instagram posts.",
+            "nl": "Deze tabel toont je instelling voor wie op je Instagram-berichten mag reageren.",
+            "de": "Diese Tabelle zeigt Ihre Einstellung dazu, wer Ihre Instagram-Beiträge kommentieren darf.",
+            "pl": "Ta tabela pokazuje Twoje ustawienie dotyczące tego, kto może komentować Twoje posty na Instagramie.",
+            "tr": "Bu tablo, Instagram gönderilerine kimlerin yorum yapabileceğine ilişkin ayarını gösterir.",
+            "ar": "يعرض هذا الجدول إعدادك لمن يمكنه التعليق على منشوراتك في إنستغرام.",
+            "ru": "В этой таблице показана ваша настройка того, кто может комментировать ваши публикации в Instagram.",
+            "it": "Questa tabella mostra la tua impostazione su chi può commentare i tuoi post di Instagram.",
+            "ro": "Acest tabel arată setarea ta privind cine poate comenta la postările tale de pe Instagram.",
+            "es": "Esta tabla muestra tu ajuste sobre quién puede comentar tus publicaciones de Instagram.",
+            "sq": "Kjo tabelë tregon cilësimin tënd se kush mund të komentojë postimet e tua në Instagram."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "preferences/settings/comments_allowed_from.json")
+
+
+def use_cross_app_messaging_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
+    """The participant's setting for cross-app messaging between Instagram and Messenger.
+
+    Parameters
+    ----------
+    reader:
+        Archive reader used to load JSON files from the DDP zip.
+    errors:
+        Mutable counter that accumulates error type counts encountered during
+        extraction.  Updated in-place.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Date``, ``Details``.
+        Empty DataFrame when the file is absent or contains no records.
+
+    Table documentation::
+
+        {
+          "summary": "The participant's setting for cross-app messaging between Instagram and Messenger.",
+          "source_file": "preferences/settings/use_cross-app_messaging.json",
+          "columns": {
+            "Date": "ISO 8601 timestamp of the entry (first timestamp found; empty when not available).",
+            "Details": "All other fields of the entry as 'label: value' pairs joined with '; '. Lists inside a record are split so that every list element is its own row. Values that look like IP addresses, e-mail addresses, phone numbers, cookies or device identifiers are removed."
+          }
+        }
+
+    Table config::
+
+        {
+          "id": "instagram_use_cross_app_messaging",
+          "title": {
+            "en": "Cross-app messaging",
+            "nl": "Berichten tussen apps",
+            "de": "App-übergreifende Nachrichten",
+            "pl": "Wiadomości między aplikacjami",
+            "tr": "Uygulamalar arası mesajlaşma",
+            "ar": "المراسلة بين التطبيقات",
+            "ru": "Обмен сообщениями между приложениями",
+            "it": "Messaggi tra app",
+            "ro": "Mesagerie între aplicații",
+            "es": "Mensajes entre aplicaciones",
+            "sq": "Mesazhet ndërmjet aplikacioneve"
+          },
+          "description": {
+            "en": "This table shows your setting for messaging between Instagram and Messenger.",
+            "nl": "Deze tabel toont je instelling voor berichten tussen Instagram en Messenger.",
+            "de": "Diese Tabelle zeigt Ihre Einstellung für Nachrichten zwischen Instagram und Messenger.",
+            "pl": "Ta tabela pokazuje Twoje ustawienie wiadomości między Instagramem a Messengerem.",
+            "tr": "Bu tablo, Instagram ile Messenger arasında mesajlaşma ayarını gösterir.",
+            "ar": "يعرض هذا الجدول إعدادك للمراسلة بين إنستغرام وماسنجر.",
+            "ru": "В этой таблице показана ваша настройка обмена сообщениями между Instagram и Messenger.",
+            "it": "Questa tabella mostra la tua impostazione per i messaggi tra Instagram e Messenger.",
+            "ro": "Acest tabel arată setarea ta pentru mesageria între Instagram și Messenger.",
+            "es": "Esta tabla muestra tu ajuste de mensajes entre Instagram y Messenger.",
+            "sq": "Kjo tabelë tregon cilësimin tënd për mesazhet ndërmjet Instagram dhe Messenger."
+          },
+          "headers": {
+            "Date": {
+              "en": "Date and time",
+              "nl": "Datum en tijd",
+              "de": "Zeitstempel",
+              "pl": "Data i godzina",
+              "tr": "Tarih ve saat",
+              "ar": "التاريخ والوقت",
+              "ru": "Дата и время",
+              "it": "Data e ora",
+              "ro": "Data și ora",
+              "es": "Fecha y hora",
+              "sq": "Data dhe ora"
+            },
+            "Details": {
+              "en": "Details",
+              "nl": "Details",
+              "de": "Details",
+              "pl": "Szczegóły",
+              "tr": "Ayrıntılar",
+              "ar": "التفاصيل",
+              "ru": "Подробности",
+              "it": "Dettagli",
+              "ro": "Detalii",
+              "es": "Detalles",
+              "sq": "Detajet"
+            }
+          }
+        }
+    """
+    return _records_df(reader, errors, "preferences/settings/use_cross-app_messaging.json")
+
+
 # Extractor registry & platform info
 # ---------------------------------------------------------------------------
 
@@ -3454,6 +6396,35 @@ EXTRACTOR_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
     "link_history_settings_to_df": link_history_settings_to_df,
     "security_and_login_events_to_df": security_and_login_events_to_df,
     "removed_suggestions_to_df": removed_suggestions_to_df,
+    "hype_to_df": hype_to_df,
+    "reels_comments_to_df": reels_comments_to_df,
+    "saved_collections_to_df": saved_collections_to_df,
+    "instants_interactions_to_df": instants_interactions_to_df,
+    "emoji_story_reactions_to_df": emoji_story_reactions_to_df,
+    "polls_to_df": polls_to_df,
+    "quizzes_to_df": quizzes_to_df,
+    "emoji_sliders_to_df": emoji_sliders_to_df,
+    "questions_to_df": questions_to_df,
+    "countdowns_to_df": countdowns_to_df,
+    "link_history_to_df": link_history_to_df,
+    "follow_requests_youve_received_to_df": follow_requests_youve_received_to_df,
+    "pending_follow_requests_to_df": pending_follow_requests_to_df,
+    "recent_follow_requests_to_df": recent_follow_requests_to_df,
+    "recently_unfollowed_profiles_to_df": recently_unfollowed_profiles_to_df,
+    "close_friends_to_df": close_friends_to_df,
+    "blocked_profiles_to_df": blocked_profiles_to_df,
+    "restricted_profiles_to_df": restricted_profiles_to_df,
+    "ads_clicked_to_df": ads_clicked_to_df,
+    "suggested_profiles_viewed_to_df": suggested_profiles_viewed_to_df,
+    "profiles_youre_not_interested_in_to_df": profiles_youre_not_interested_in_to_df,
+    "posts_youre_not_interested_in_to_df": posts_youre_not_interested_in_to_df,
+    "accounts_youre_not_interested_in_to_df": accounts_youre_not_interested_in_to_df,
+    "advertisers_using_your_activity_or_information_to_df": advertisers_using_your_activity_or_information_to_df,
+    "your_topics_to_df": your_topics_to_df,
+    "recommended_topics_to_df": recommended_topics_to_df,
+    "off_meta_activity_to_df": off_meta_activity_to_df,
+    "comments_allowed_from_to_df": comments_allowed_from_to_df,
+    "use_cross_app_messaging_to_df": use_cross_app_messaging_to_df,
 }
 
 
