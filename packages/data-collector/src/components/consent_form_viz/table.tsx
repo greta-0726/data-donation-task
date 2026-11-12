@@ -43,29 +43,61 @@ interface Tooltip {
 // Per-table column widths for tables that need a layout different from the
 // default. Single-column tables are handled automatically below.
 const TABLE_COLUMN_WIDTHS: Record<string, string[]> = {
-  facebook_reels_usage: ['75%', '25%'],
-  facebook_ad_settings: ['80%', '20%'],
-  facebook_privacy_settings: ['70%', '30%'],
-  facebook_preference_settings: ['20%', '50%', '30%'],
-  facebook_off_meta_settings: ['50%', '25%', '25%'],
-  facebook_unfollowed_profiles: ['70%', '30%'],
-  facebook_snooze: ['70%', '30%'],
-  facebook_hidden_ads: ['20%', '55%', '25%'],
-  facebook_your_post_audiences: ['20%', '10%', '40%', '30%']
+  facebook_feed: ['18%', '42%', '22%', '18%'],
+  facebook_likes: ['18%', '12%', '34%', '20%', '16%'],
+  facebook_story_interactions: ['50%', '25%', '25%'],
+  facebook_saved: ['30%', '50%', '20%'],
+  facebook_comments: ['55%', '25%', '20%'],
+  facebook_link_history: ['75%', '25%'],
+  facebook_off_meta: ['40%', '35%', '25%'],
+  facebook_advertisers_using: ['40%', '60%'],
+  facebook_ad_topics: ['50%', '50%'],
+  instagram_feed: ['18%', '42%', '22%', '18%'],
+  instagram_likes: ['18%', '12%', '34%', '20%', '16%'],
+  instagram_story_interactions: ['50%', '25%', '25%'],
+  instagram_saved: ['30%', '50%', '20%'],
+  instagram_comments: ['55%', '25%', '20%'],
+  instagram_link_history: ['75%', '25%'],
+  instagram_off_meta: ['40%', '35%', '25%'],
+  instagram_advertisers_using: ['40%', '60%'],
+  facebook_ads_viewed: ['40%', '40%', '20%'],
+  facebook_advertisers_interacted: ['20%', '30%', '32%', '18%'],
+  instagram_ads_viewed: ['18%', '42%', '22%', '18%'],
+  instagram_stories_viewed: ['18%', '42%', '22%', '18%'],
+  instagram_searches: ['35%', '45%', '20%'],
+  instagram_following: ['30%', '50%', '20%'],
+  instagram_followers: ['30%', '50%', '20%'],
+  instagram_hashtags: ['30%', '50%', '20%']
 }
 
-// Columns listed here are allowed to wrap instead of being truncated.
-// Single-column tables are handled automatically below.
+// Columns listed here are allowed to wrap instead of being truncated
+// (column indices start at 0). Single-column tables are handled automatically below.
 const TABLE_WRAP_COLUMNS: Record<string, number[]> = {
-  facebook_reels_usage: [0],
-  facebook_ad_settings: [0],
-  facebook_privacy_settings: [0, 1],
-  facebook_preference_settings: [1, 2],
-  facebook_off_meta_settings: [0, 1],
-  facebook_unfollowed_profiles: [0],
-  facebook_snooze: [0],
-  facebook_hidden_ads: [1],
-  facebook_your_post_audiences: [2, 3]
+  facebook_feed: [1, 2],
+  facebook_likes: [2, 3],
+  facebook_story_interactions: [0],
+  facebook_saved: [1],
+  facebook_comments: [0],
+  facebook_link_history: [0],
+  facebook_off_meta: [0],
+  facebook_advertisers_using: [0, 1],
+  facebook_ad_topics: [0, 1],
+  instagram_feed: [1, 2],
+  instagram_likes: [2, 3],
+  instagram_story_interactions: [0],
+  instagram_saved: [1],
+  instagram_comments: [0],
+  instagram_link_history: [0],
+  instagram_off_meta: [0],
+  instagram_advertisers_using: [0, 1],
+  facebook_ads_viewed: [0, 1],
+  facebook_advertisers_interacted: [1, 2],
+  instagram_ads_viewed: [1, 2],
+  instagram_stories_viewed: [1, 2],
+  instagram_searches: [0, 1],
+  instagram_following: [1],
+  instagram_followers: [1],
+  instagram_hashtags: [1]
 }
 
 export const Table = ({

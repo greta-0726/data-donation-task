@@ -5,7 +5,7 @@ export function formatDate(
   format: DateFormat,
   minValues: number = 10
 ): [string[], Record<string, number> | null] {
-  let formattedDate: string[];
+  let formattedDate: string[] = dateString;
   const dateNumbers = dateString.map((date) => new Date(date).getTime());
   let domain: [number, number] | null = null;
   let formatter: (date: Date) => string = (date) => date.toISOString();
@@ -23,29 +23,26 @@ export function formatDate(
   }
 
   if (format === "month") {
-    const monthFormatter = new Intl.DateTimeFormat("default", { month: "short" });
     formatter = (date) => {
       const year = date.getFullYear().toString();
-      const month = monthFormatter.format(date);
+      const month = date.toLocaleString("default", { month: "short" });
       return `${year}-${month}`;
     };
   }
 
   if (format === "day") {
-    const monthFormatter = new Intl.DateTimeFormat("default", { month: "short" });
     formatter = (date) => {
       const year = date.getFullYear().toString();
-      const month = monthFormatter.format(date);
+      const month = date.toLocaleString("default", { month: "short" });
       const day = date.getDate().toString();
       return `${year}-${month}-${day}`;
     };
   }
 
   if (format === "hour") {
-    const monthFormatter = new Intl.DateTimeFormat("default", { month: "short" });
     formatter = (date) => {
       const year = date.getFullYear().toString();
-      const month = monthFormatter.format(date);
+      const month = date.toLocaleString("default", { month: "short" });
       const day = date.getDate().toString();
       const hour = date.getHours();
       return `${year}-${month}-${day} ${hour}:00`;
@@ -53,27 +50,46 @@ export function formatDate(
   }
 
   if (format === "month_cycle") {
-    const intlFormatter = new Intl.DateTimeFormat("default", { month: "long" });
-    formatter = (date) => intlFormatter.format(date);
+    formatter = (date) => {
+      const intlFormatter = new Intl.DateTimeFormat("default", { month: "long" });
+      return intlFormatter.format(date);
+    };
     // can be any year, starting at january
     domain = [new Date("2000-01-01").getTime(), new Date("2001-01-01").getTime()];
   }
   if (format === "weekday_cycle") {
-    const intlFormatter = new Intl.DateTimeFormat("default", { weekday: "long" });
-    formatter = (date) => intlFormatter.format(date);
+    formatter = (date) => {
+      const intlFormatter = new Intl.DateTimeFormat("default", { weekday: "long" });
+      return intlFormatter.format(date);
+    };
     // can be any full week, starting at monday
     domain = [new Date("2023-11-06").getTime(), new Date("2023-11-13").getTime()];
   }
   if (format === "hour_cycle") {
-    const intlFormatter = new Intl.DateTimeFormat("default", { hour: "numeric", hour12: false });
-    formatter = (date) => intlFormatter.format(date);
+    formatter = (date) => {
+      const intlFormatter = new Intl.DateTimeFormat("default", { hour: "numeric", hour12: false });
+      return intlFormatter.format(date);
+    };
     // can be any day, starting at midnight
     domain = [new Date("2000-01-01").getTime(), new Date("2000-01-02").getTime()];
   }
 
   formattedDate = dateNumbers.map((date) => formatter(new Date(date)));
+  // For cycles (hour of day, weekday, month) the domain is fixed; otherwise it
+  // comes from the data, and every date in the data must get a sort value.
+  const isCycle = domain != null;
   if (domain == null) domain = getDomain(dateNumbers);
   const sortableDate: Record<string, number> | null = createSortable(domain, format, formatter);
+  if (!isCycle && sortableDate != null) {
+    // Stepping from the first date in fixed intervals can miss the last day
+    // (or a day shortened by daylight saving time); those dates then had no
+    // sort value and appeared at the start of the chart.
+    for (const date of dateNumbers) {
+      if (Number.isNaN(date)) continue;
+      const datestring = formatter(new Date(date));
+      if (sortableDate[datestring] === undefined) sortableDate[datestring] = date;
+    }
+  }
 
   return [formattedDate, sortableDate];
 }
@@ -158,7 +174,7 @@ export function extractUrlDomain(x: string): string {
   try {
     const url = new URL(x);
     domain = url.hostname.replace(/^www\./, "").replace(/^m\./, "");
-  } catch {
+  } catch (_) {
     domain = x;
   }
   return domain.trim();
