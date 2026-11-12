@@ -73,31 +73,18 @@ const TABLE_COLUMN_WIDTHS: Record<string, string[]> = {
 // Columns listed here are allowed to wrap instead of being truncated
 // (column indices start at 0). Single-column tables are handled automatically below.
 const TABLE_WRAP_COLUMNS: Record<string, number[]> = {
-  facebook_feed: [1, 2],
-  facebook_likes: [2, 3],
   facebook_story_interactions: [0],
-  facebook_saved: [1],
   facebook_comments: [0],
-  facebook_link_history: [0],
   facebook_off_meta: [0],
   facebook_advertisers_using: [0, 1],
   facebook_ad_topics: [0, 1],
-  instagram_feed: [1, 2],
-  instagram_likes: [2, 3],
   instagram_story_interactions: [0],
-  instagram_saved: [1],
   instagram_comments: [0],
-  instagram_link_history: [0],
   instagram_off_meta: [0],
   instagram_advertisers_using: [0, 1],
-  facebook_ads_viewed: [0, 1],
-  facebook_advertisers_interacted: [1, 2],
-  instagram_ads_viewed: [1, 2],
-  instagram_stories_viewed: [1, 2],
-  instagram_searches: [0, 1],
-  instagram_following: [1],
-  instagram_followers: [1],
-  instagram_hashtags: [1]
+  facebook_ads_viewed: [0],
+  facebook_advertisers_interacted: [1],
+  instagram_searches: [0]
 }
 
 export const Table = ({

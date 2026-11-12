@@ -18,8 +18,22 @@ function createVisualizationData (
 ): ChartVisualizationData {
   const visualizationData = initializeVisualizationData(table, visualization)
 
-  visualizationData.data = Object.values(aggregate)
+  let aggregated = Object.values(aggregate)
     .sort((a: any, b: any) => (a.sortBy < b.sortBy ? -1 : b.sortBy < a.sortBy ? 1 : 0))
+
+  // Top N: only the groups with the highest totals, largest first. Empty
+  // groups (e.g. rows without an account) are not part of a ranking.
+  const top = visualization.group.top
+  if (top !== undefined) {
+    const total = (d: PrepareAggregatedData): number =>
+      Object.values(d.values).reduce((sum, v) => sum + Number(v), 0)
+    aggregated = aggregated
+      .filter((d) => d.xValue.trim() !== '')
+      .sort((a, b) => total(b) - total(a))
+      .slice(0, top)
+  }
+
+  visualizationData.data = aggregated
     .map((d) => {
       for (const key of Object.keys(d.values)) d.values[key] = Math.round(d.values[key] * 100) / 100
 
@@ -110,11 +124,6 @@ function aggregateData (table: Table, visualization: ChartVisualization): Record
       }
 
       const yValue = yValues[i]
-      // Number() never returns null/undefined (only NaN for unparsable input), so
-      // `Number(yValue) ?? 0` never actually falls back -- a non-numeric cell poisons
-      // the running sum with NaN. Guard against NaN explicitly instead.
-      const numericYValue = Number(yValue)
-      const yValueOrZero = Number.isNaN(numericYValue) ? 0 : numericYValue
       const group = yGroup != null ? yGroup[i] : value.column
 
       const sortBy = xSortable != null ? xSortable[xValue] : groupBy[i]
@@ -122,7 +131,7 @@ function aggregateData (table: Table, visualization: ChartVisualization): Record
       // calculate group summary statistics. This is used for the mean, pct and count_pct aggregations
       if (groupSummary[group] === undefined) groupSummary[group] = { n: 0, sum: 0 }
       if (aggFun === 'count_pct' || aggFun === 'mean') groupSummary[group].n += 1
-      if (aggFun === 'pct') groupSummary[group].sum += yValueOrZero
+      if (aggFun === 'pct') groupSummary[group].sum += Number(yValue) ?? 0
 
       if (aggregate[xValue] === undefined) {
         aggregate[xValue] = {
@@ -140,7 +149,7 @@ function aggregateData (table: Table, visualization: ChartVisualization): Record
       if (aggregate[xValue].values[group] === undefined) aggregate[xValue].values[group] = 0
       if (aggFun === 'count' || aggFun === 'count_pct') aggregate[xValue].values[group] += 1
       if (aggFun === 'sum' || aggFun === 'mean' || aggFun === 'pct') {
-        aggregate[xValue].values[group] += yValueOrZero
+        aggregate[xValue].values[group] += Number(yValue) ?? 0
       }
     }
 

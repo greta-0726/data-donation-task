@@ -640,7 +640,7 @@ def instagram_posts_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> p
                 "es": "El número total de publicaciones de Instagram que viste a lo largo del tiempo",
                 "sq": "Numri total i postimeve në Instagram që ke parë me kalimin e kohës"
               },
-              "type": "area",
+              "type": "bar",
               "group": {
                 "column": "Date",
                 "dateFormat": "auto",
@@ -676,6 +676,33 @@ def instagram_posts_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> p
               "values": [
                 {
                   "label": "Anzahl"
+                }
+              ]
+            },
+            {
+              "title": {
+                "en": "The 10 accounts whose posts you saw most often",
+                "nl": "De 10 accounts waarvan je het vaakst berichten zag",
+                "de": "Die 10 Accounts, deren Beiträge Sie am häufigsten gesehen haben",
+                "pl": "10 kont, których posty widziałeś/aś najczęściej",
+                "tr": "Gönderilerini en sık gördüğün 10 hesap",
+                "ar": "الحسابات العشرة التي رأيت منشوراتها أكثر من غيرها",
+                "ru": "10 аккаунтов, публикации которых вы видели чаще всего",
+                "it": "I 10 account di cui hai visto più spesso i post",
+                "ro": "Cele 10 conturi ale căror postări le-ai văzut cel mai des",
+                "es": "Las 10 cuentas cuyas publicaciones viste con más frecuencia",
+                "sq": "10 llogaritë, postimet e të cilave i ke parë më shpesh"
+              },
+              "type": "bar",
+              "group": {
+                "column": "Account",
+                "label": "Account",
+                "top": 10
+              },
+              "values": [
+                {
+                  "label": "Anzahl",
+                  "aggregate": "count"
                 }
               ]
             }
@@ -801,7 +828,36 @@ def instagram_ads_viewed_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.
               "es": "Fecha y hora",
               "sq": "Data dhe ora"
             }
-          }
+          },
+          "visualizations": [
+            {
+              "title": {
+                "en": "The 10 advertisers whose ads you saw most often",
+                "nl": "De 10 adverteerders van wie je het vaakst advertenties zag",
+                "de": "Die 10 Werbetreibenden, deren Werbung Sie am häufigsten gesehen haben",
+                "pl": "10 reklamodawców, których reklamy widziałeś/aś najczęściej",
+                "tr": "Reklamlarını en sık gördüğün 10 reklamveren",
+                "ar": "المعلنون العشرة الذين رأيت إعلاناتهم أكثر من غيرهم",
+                "ru": "10 рекламодателей, чью рекламу вы видели чаще всего",
+                "it": "I 10 inserzionisti di cui hai visto più spesso le inserzioni",
+                "ro": "Cei 10 agenți de publicitate ale căror reclame le-ai văzut cel mai des",
+                "es": "Los 10 anunciantes cuyos anuncios viste con más frecuencia",
+                "sq": "10 reklamuesit, reklamat e të cilëve i ke parë më shpesh"
+              },
+              "type": "bar",
+              "group": {
+                "column": "Account",
+                "label": "Werbetreibende",
+                "top": 10
+              },
+              "values": [
+                {
+                  "label": "Anzahl",
+                  "aggregate": "count"
+                }
+              ]
+            }
+          ]
         }
     """
     rows = _ig_content_rows(reader, errors, "ads_and_topics/ads_viewed")
