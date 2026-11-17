@@ -25,27 +25,27 @@ export function formatDate(
   if (format === "month") {
     formatter = (date) => {
       const year = date.getFullYear().toString();
-      const month = date.toLocaleString("default", { month: "short" });
-      return `${year}-${month}`;
+      const month = (date.getMonth() + 1).toString().padStart(2, "0");
+      return `${month}.${year}`;
     };
   }
 
   if (format === "day") {
     formatter = (date) => {
       const year = date.getFullYear().toString();
-      const month = date.toLocaleString("default", { month: "short" });
-      const day = date.getDate().toString();
-      return `${year}-${month}-${day}`;
+      const month = (date.getMonth() + 1).toString().padStart(2, "0");
+      const day = date.getDate().toString().padStart(2, "0");
+      return `${day}.${month}.${year}`;
     };
   }
 
   if (format === "hour") {
     formatter = (date) => {
       const year = date.getFullYear().toString();
-      const month = date.toLocaleString("default", { month: "short" });
-      const day = date.getDate().toString();
-      const hour = date.getHours();
-      return `${year}-${month}-${day} ${hour}:00`;
+      const month = (date.getMonth() + 1).toString().padStart(2, "0");
+      const day = date.getDate().toString().padStart(2, "0");
+      const hour = date.getHours().toString().padStart(2, "0");
+      return `${day}.${month}.${year} ${hour}:00`;
     };
   }
 

@@ -40,51 +40,56 @@ interface Tooltip {
   y: number
 }
 
-// Per-table column widths for tables that need a layout different from the
-// default. Single-column tables are handled automatically below.
-const TABLE_COLUMN_WIDTHS: Record<string, string[]> = {
-  facebook_feed: ['18%', '42%', '22%', '18%'],
-  facebook_likes: ['18%', '12%', '34%', '20%', '16%'],
-  facebook_story_interactions: ['50%', '25%', '25%'],
-  facebook_saved: ['30%', '50%', '20%'],
-  facebook_comments: ['55%', '25%', '20%'],
-  facebook_link_history: ['75%', '25%'],
-  facebook_off_meta: ['40%', '35%', '25%'],
-  facebook_advertisers_using: ['40%', '60%'],
-  facebook_ad_topics: ['50%', '50%'],
-  instagram_feed: ['18%', '42%', '22%', '18%'],
-  instagram_likes: ['18%', '12%', '34%', '20%', '16%'],
-  instagram_story_interactions: ['50%', '25%', '25%'],
-  instagram_saved: ['30%', '50%', '20%'],
-  instagram_comments: ['55%', '25%', '20%'],
-  instagram_link_history: ['75%', '25%'],
-  instagram_off_meta: ['40%', '35%', '25%'],
-  instagram_advertisers_using: ['40%', '60%'],
-  facebook_ads_viewed: ['40%', '40%', '20%'],
-  facebook_advertisers_interacted: ['20%', '30%', '32%', '18%'],
-  instagram_ads_viewed: ['18%', '42%', '22%', '18%'],
-  instagram_stories_viewed: ['18%', '42%', '22%', '18%'],
-  instagram_searches: ['35%', '45%', '20%'],
-  instagram_following: ['30%', '50%', '20%'],
-  instagram_followers: ['30%', '50%', '20%'],
-  instagram_hashtags: ['30%', '50%', '20%']
+// Per-table column widths, by column name. A column that is missing in a
+// donation (e.g. no texts) is simply skipped; the other columns keep their width.
+// Single-column tables are handled automatically below.
+const TABLE_COLUMN_WIDTHS: Record<string, Record<string, string>> = {
+  facebook_feed: { Account: '18%', Text: '42%', URL: '22%', Date: '18%' },
+  facebook_likes: { Account: '30%', Type: '12%', URL: '38%', Date: '20%' },
+  facebook_story_interactions: { Account: '50%', Type: '25%', Date: '25%' },
+  facebook_comments: { Comment: '55%', Account: '25%', Date: '20%' },
+  facebook_link_history: { URL: '75%', Date: '25%' },
+  facebook_off_meta: { Website: '40%', Event: '35%', Date: '25%' },
+  facebook_advertisers_using: { Advertiser: '40%', Usage: '60%' },
+  facebook_ad_topics: { Topic: '50%', List: '50%' },
+  instagram_feed: { Account: '18%', Text: '42%', URL: '22%', Date: '18%' },
+  instagram_likes: { Account: '18%', Type: '12%', Text: '34%', URL: '20%', Date: '16%' },
+  instagram_story_interactions: { Account: '50%', Type: '25%', Date: '25%' },
+  instagram_saved: { Account: '30%', URL: '50%', Date: '20%' },
+  instagram_comments: { Comment: '55%', Account: '25%', Date: '20%' },
+  instagram_link_history: { URL: '75%', Date: '25%' },
+  instagram_off_meta: { Website: '40%', Event: '35%', Date: '25%' },
+  instagram_advertisers_using: { Advertiser: '40%', Usage: '60%' },
+  facebook_ads_viewed: { Advertiser: '40%', URL: '40%', Date: '20%' },
+  facebook_searches: { Search: '80%', Date: '20%' },
+  facebook_friends: { Name: '80%', Date: '20%' },
+  facebook_following: { Name: '80%', Date: '20%' },
+  facebook_saved: { Account: '40%', URL: '40%', Date: '20%' },
+  facebook_advertisers_interacted: { Event: '20%', Advertiser: '30%', URL: '32%', Date: '18%' },
+  instagram_ads_viewed: { Account: '18%', Text: '42%', URL: '22%', Date: '18%' },
+  instagram_stories_viewed: { Account: '18%', Text: '42%', URL: '22%', Date: '18%' },
+  instagram_searches: { Search: '45%', URL: '35%', Date: '20%' },
+  instagram_following: { Account: '30%', URL: '50%', Date: '20%' },
+  instagram_followers: { Account: '30%', URL: '50%', Date: '20%' },
+  instagram_hashtags: { Hashtag: '30%', URL: '50%', Date: '20%' }
 }
 
-// Columns listed here are allowed to wrap instead of being truncated
-// (column indices start at 0). Single-column tables are handled automatically below.
-const TABLE_WRAP_COLUMNS: Record<string, number[]> = {
-  facebook_story_interactions: [0],
-  facebook_comments: [0],
-  facebook_off_meta: [0],
-  facebook_advertisers_using: [0, 1],
-  facebook_ad_topics: [0, 1],
-  instagram_story_interactions: [0],
-  instagram_comments: [0],
-  instagram_off_meta: [0],
-  instagram_advertisers_using: [0, 1],
-  facebook_ads_viewed: [0],
-  facebook_advertisers_interacted: [1],
-  instagram_searches: [0]
+// Columns (by name) that may wrap instead of being truncated.
+// Single-column tables are handled automatically below.
+const TABLE_WRAP_COLUMNS: Record<string, string[]> = {
+  facebook_story_interactions: ['Account'],
+  facebook_comments: ['Comment'],
+  facebook_off_meta: ['Website'],
+  facebook_advertisers_using: ['Advertiser', 'Usage'],
+  facebook_ad_topics: ['Topic', 'List'],
+  instagram_story_interactions: ['Account'],
+  instagram_comments: ['Comment'],
+  instagram_off_meta: ['Website'],
+  instagram_advertisers_using: ['Advertiser', 'Usage'],
+  facebook_ads_viewed: ['Advertiser'],
+  facebook_searches: ['Search'],
+  facebook_advertisers_interacted: ['Advertiser'],
+  instagram_searches: ['Search']
 }
 
 export const Table = ({
@@ -171,9 +176,17 @@ export const Table = ({
 
   function getColumnStyle (index: number): React.CSSProperties {
     const widths = TABLE_COLUMN_WIDTHS[table.id]
+    const width = widths?.[columnNames[index]]
 
-    if (widths?.[index] != null) {
-      return { width: widths[index] }
+    if (widths != null && width != null) {
+      // Columns can be missing in a donation (e.g. no texts). Scale the widths
+      // of the columns that are present to 100 %, so the free space is not
+      // given to the checkbox column on the left.
+      const total = columnNames.reduce((sum, name) => sum + (parseFloat(widths[name] ?? '0') || 0), 0)
+      if (total > 0 && width.endsWith('%')) {
+        return { width: `${(parseFloat(width) / total) * 100}%` }
+      }
+      return { width }
     }
 
     // A table with only one data column should use the full available width.
@@ -193,7 +206,7 @@ export const Table = ({
   }
 
   function shouldWrapColumn (index: number): boolean {
-    if (TABLE_WRAP_COLUMNS[table.id]?.includes(index) ?? false) return true
+    if (TABLE_WRAP_COLUMNS[table.id]?.includes(columnNames[index]) ?? false) return true
 
     // Do not truncate single-column tables at the Cell component's 15rem
     // default. Let their values use the full table width instead.

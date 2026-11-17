@@ -398,7 +398,14 @@ def _st_without_empty_rows(fn):
             lambda row: any(str(v).strip() not in ("", "0", "nan", "None", "NaT") for v in row), axis=1
         )
         df = df[filled].reset_index(drop=True)
-        return df if not df.empty else pd.DataFrame()
+        if df.empty:
+            return pd.DataFrame()
+        # Columns without any value in this export (e.g. no texts) are not shown.
+        empty_columns = [
+            c for c in df.columns
+            if all(str(v).strip() in ("", "nan", "None", "NaT") for v in df[c])
+        ]
+        return df.drop(columns=empty_columns)
     return wrapper
 
 
@@ -417,9 +424,22 @@ _ST_OFF_META_EVENTS = {
     "START_TRIAL": "Testphase begonnen",
     "ACTIVATE_APP": "App geöffnet",
     "CUSTOM": "Benutzerdefiniertes Ereignis",
-    "AD_REQUEST": "Werbeanfrage",
-    "AD_IMPRESSION": "Werbeeinblendung",
-    "AD_CLICK": "Werbeklick",
+    # Ads that Meta shows in other apps (Meta Audience Network):
+    "AD_REQUEST": "App hat Werbung von Meta angefordert",
+    "AD_IMPRESSION": "Werbung von Meta in der App angezeigt",
+    "AD_CLICK": "Werbung von Meta in der App angeklickt",
+    "SCHEDULE": "Termin vereinbart",
+    "CONTACT": "Kontakt aufgenommen",
+    "CUSTOMIZE_PRODUCT": "Produkt angepasst",
+    "DONATE": "Spende",
+    "FIND_LOCATION": "Standort gesucht",
+    "SUBMIT_APPLICATION": "Antrag/Bewerbung abgeschickt",
+    "RATE": "Bewertung abgegeben",
+    "ACHIEVE_LEVEL": "Level erreicht (Spiel)",
+    "UNLOCK_ACHIEVEMENT": "Erfolg freigeschaltet (Spiel)",
+    "COMPLETE_TUTORIAL": "Tutorial abgeschlossen",
+    "SPENT_CREDITS": "Guthaben ausgegeben",
+    "OTHER": "Sonstiges",
     "NOT_AUTHORIZED": "Nicht autorisiert",
 }
 
@@ -1977,7 +1997,7 @@ def instagram_interests_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.D
     Returns
     -------
     pd.DataFrame
-        Columns: ``Topic``, ``Date``.
+        Columns: ``Topic``.
         Empty DataFrame when the file is absent or contains no records.
 
     Table documentation::
@@ -1986,8 +2006,7 @@ def instagram_interests_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.D
           "summary": "This table shows interests and topics that were assigned to you based on your activity and that influence which posts and ads you see.",
           "source_file": "preferences/your_topics/your_topics.json",
           "columns": {
-            "Topic": "Name of the topic or interest.",
-            "Date": "ISO 8601 timestamp."
+            "Topic": "Name of the topic or interest."
           }
         }
 
@@ -2034,19 +2053,6 @@ def instagram_interests_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.D
               "ro": "Subiect",
               "es": "Tema",
               "sq": "Tema"
-            },
-            "Date": {
-              "en": "Date and time",
-              "nl": "Datum en tijd",
-              "de": "Zeitstempel",
-              "pl": "Data i godzina",
-              "tr": "Tarih ve saat",
-              "ar": "التاريخ والوقت",
-              "ru": "Дата и время",
-              "it": "Data e ora",
-              "ro": "Data și ora",
-              "es": "Fecha y hora",
-              "sq": "Data dhe ora"
             }
           }
         }
@@ -2056,19 +2062,19 @@ def instagram_interests_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.D
         try:
             for record in _st_records(data):
                 if isinstance(record, str):
-                    rows.append((_st_fix(record), ""))
+                    rows.append((_st_fix(record),))
                     continue
                 if not isinstance(record, dict):
                     continue
                 name = _st_top_value(record, "name")
                 if name:
-                    rows.append((name, _st_iso(_st_record_ts(record), errors)))
+                    rows.append((name,))
                 for _, value in _st_vec_values(record):
-                    rows.append((value, ""))
+                    rows.append((value,))
         except Exception as e:
             logger.error("Exception caught: %s", e)
             errors[type(e).__name__] += 1
-    return _st_df(rows, ["Topic", "Date"])
+    return _st_df(list(dict.fromkeys(rows)), ["Topic"])
 
 
 def instagram_link_history_to_df(reader: ZipArchiveReader, errors: Counter) -> pd.DataFrame:
